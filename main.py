@@ -27,12 +27,10 @@ from colossalai.logging import disable_existing_loggers, get_dist_logger
 from colossalai.trainer import Trainer, hooks
 from colossalai.utils import MultiTimer, get_dataloader
 
-from hyperbox_app.distributed.networks.ofa import OFAMobileNetV3
 from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.networks.base_nas_network import BaseNASNetwork
-from hyperbox.networks.darts import DartsNetwork
-from hyperbox.networks.spos import ShuffleNASNetV2
 from hyperbox.mutator import RandomMutator
+
 
 def get_cpu_mem():
     return psutil.Process().memory_info().rss / 1024**2
@@ -45,64 +43,31 @@ def get_gpu_mem():
 def get_mem_info(prefix=''):
     return f'{prefix}GPU memory usage: {get_gpu_mem():.2f} MB, CPU memory usage: {get_cpu_mem():.2f} MB'
 
-def get_ofa(width_mult=2):
-    return OFAMobileNetV3(
-        width_mult=width_mult, depth_list=[3,4], expand_ratio_list=[3,4],
-        base_stage_width=[64, 128, 256, 512, 512, 1024, 1024, 1024, 2048],
-        num_classes=10
-    )
 
-def get_darts():
-    return DartsNetwork(in_channels=3, channels=24, n_classes=10, n_layers=24,
-        n_nodes=4,stem_multiplier=5)
-
-class NASModel(BaseNASNetwork):
-    def __init__(self, model_init_func=None, is_search_inner=False, rank=None, mask=None):
-        super().__init__(mask)
+class NASModel(torch.nn.Module):
+    def __init__(self, mask=None):
+        super().__init__()
         self.conv1 = OperationSpace(
             [torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),
              torch.nn.Conv2d(3, 64, kernel_size=5, stride=1, padding=2, bias=False),
              torch.nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=False),
-            ], key='conv1', mask=self.mask
+            ], key='conv1'
         )
-        self.conv2 = OperationSpace(
-            [torch.nn.Conv2d(64, 96, kernel_size=3, stride=1, padding=1, bias=False),
-             torch.nn.Conv2d(64, 96, kernel_size=5, stride=1, padding=2, bias=False),
-             torch.nn.Conv2d(64, 96, kernel_size=7, stride=1, padding=3, bias=False),
-            ], key='conv2', mask=self.mask
-        )
-        self.conv3 = OperationSpace(
-            [torch.nn.Conv2d(96, 128, kernel_size=3, stride=1, padding=1, bias=False),
-             torch.nn.Conv2d(96, 128, kernel_size=5, stride=1, padding=2, bias=False),
-             torch.nn.Conv2d(96, 128, kernel_size=7, stride=1, padding=3, bias=False),
-            ], key='conv3', mask=self.mask
-        )
+        self.conv2 = torch.nn.Conv2d(64, 96, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv3 = torch.nn.Conv2d(96, 512, kernel_size=3, stride=1, padding=1, bias=False)
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = torch.nn.Linear(128, 10)
-        # self.model = model_init_func()
-        # self.mutator = RandomMutator(self.model)
-        # self.model = resnet18()
-        # self.mutator = torch.nn.Linear(10,10)
-        self.is_search_inner = is_search_inner
-        self.rank = rank
+        self.fc = OperationSpace(
+            [torch.nn.Linear(512,10),torch.nn.Linear(512,10),torch.nn.Linear(512,10)], key='fc')
 
     def forward(self, x):
-        print(x.shape)
         out = self.conv1(x)
-        print(out.shape)
         out = self.conv2(out)
-        print(out.shape)
         out = self.conv3(out)
-        print(out.shape)
-        out = self.gavg(out).view(out.size(0), -1)
-        print(out.shape)
+        out = self.gavg(out)
+        out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
-        # if self.is_search_inner:
-        #     self.mutator.reset()
-        #     if self.rank is not None:
-        #         logger.info(f'Rank {self.rank}: arch={self.model.arch}')
-        # return self.model(x)
+
 
 def main():
     # initialize distributed setting
@@ -142,27 +107,19 @@ def main():
     if use_pipeline:
         pipelinable = PipelinableContext()
         with pipelinable:
-            # model = _create_vit_model(**model_kwargs)
-            # model = get_ofa()
-            # model = get_darts()
-            # model = NASModel()
-            model = resnet18()
-            # rm = RandomMutator(model)
-            # model = NASModel(get_ofa, is_search_inner=True)
-            # rm = None
+            model = NASModel()
+        exec_seq = ['conv1', 'conv2', 'conv3', 'gavg', (lambda x: torch.flatten(x, 1), "behind"), 'fc']
+        logger.info(f"rank {grank}: {dict(pipelinable._model.named_modules()).keys()}")
+        pipelinable.to_layer_list(exec_seq)
         logger.info(f"Before Pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
-        pipelinable.to_layer_list()
-        # pipelinable.policy = "uniform"
         pipelinable.policy = "balanced"
         model = pipelinable.partition(1, gpc.pipeline_parallel_size, gpc.get_local_rank(ParallelMode.PIPELINE))
         rm = RandomMutator(model)
         rm.reset()
-        logger.info(f"After Pipeline: rank{grank} arch={rm._cache}")
+        logger.info(f"After Pipeline: rank{grank} arch={rm._cache}\n{model}")
         logger.info(f"After pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
     else:
-        # model = _create_vit_model(**model_kwargs)
-        model = get_ofa()
-        # model = get_darts()
+        model = NASModel()
         rm = RandomMutator(model)
         logger.info(f"rank{grank} param size={sum(p.numel() for p in model.parameters())/1e6}MB")
 
@@ -179,7 +136,7 @@ def main():
     logger.info(get_mem_info(prefix='After init model, '), ranks=[0])
 
     # create dataloaders
-    root = os.environ.get('DATA', './data')
+    root = os.environ.get('DATA', '~/datasets/cifar10')
     train_dataloader, test_dataloader = build_cifar(gpc.config.BATCH_SIZE, root, pad_if_needed=True)
 
     # create loss function
@@ -215,31 +172,16 @@ def main():
 
         if gpc.get_global_rank() == 0:
             description = 'Epoch {} / {}'.format(epoch, gpc.config.NUM_EPOCHS)
-            # progress = tqdm(range(len(train_dataloader)), desc=description)
-            progress = tqdm(train_dataloader, desc=description)
+            progress = tqdm(range(len(train_dataloader)), desc=description)
         else:
-            # progress = range(len(train_dataloader))
-            progress = train_dataloader
-        # for _ in progress:
-        for idx, (imgs, labels) in enumerate(progress):
-            if rm is not None:
-                rm.reset()
-            
+            progress = range(len(train_dataloader))
+        for _ in progress:
+            rm.reset()
+            logger.info(f"rank{grank} arch={rm._cache}")
             engine.zero_grad()
-            output = engine(imgs.to(gpc.get_global_rank()))
-            logger.info(f"rank{grank} imgs.shape={imgs.shape} labels.shape={labels.shape} output size={output.size()}")
-            # logger.info(get_mem_info(prefix=f'[{idx+1}/{len(progress)}] Forward '), ranks=[0])
-            loss = engine.criterion(output, labels.to(gpc.get_global_rank()))
-            engine.backward(loss)
-            # logger.info(get_mem_info(prefix=f'[{idx+1}/{len(progress)}] Backward '), ranks=[0])
+            engine.execute_schedule(data_iter, return_output_label=False)
             engine.step()
-            # logger.info(get_mem_info(prefix=f'[{idx+1}/{len(progress)}] Optimizer step '), ranks=[0])
-            
-            # engine.zero_grad()
-            # rm.reset()
-            # engine.execute_schedule(data_iter, return_output_label=False)
-            # engine.step()
-            # lr_scheduler.step()
+            lr_scheduler.step()
 
 
 if __name__ == '__main__':
