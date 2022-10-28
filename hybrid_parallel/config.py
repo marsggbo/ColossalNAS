@@ -42,8 +42,8 @@ parallel = dict(
     tensor=dict(mode=TENSOR_PARALLEL_MODE, size=TENSOR_PARALLEL_SIZE),
 )
 
-fp16 = dict(mode=AMP_TYPE.NAIVE)
-clip_grad_norm = 1.0
+# fp16 = dict(mode=AMP_TYPE.NAIVE)
+# clip_grad_norm = 1.0
 
 # pipeline config
 NUM_MICRO_BATCHES = parallel['pipeline']
