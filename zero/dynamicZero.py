@@ -14,10 +14,6 @@ from time import time
 from functools import partial
 
 from ipdb import set_trace
-from hyperbox_app.distributed.networks.ofa import OFAMobileNetV3
-from hyperbox.networks.base_nas_network import BaseNASNetwork
-from hyperbox.mutables.spaces import OperationSpace
-from hyperbox.mutator import RandomMutator
 
 
 def get_cpu_mem():
@@ -31,14 +27,6 @@ def get_gpu_mem():
 def get_mem_info(prefix=''):
     return f'{prefix}GPU memory usage: {get_gpu_mem():.2f} MB, CPU memory usage: {get_cpu_mem():.2f} MB'
 
-
-def get_ofa(width_mult=4):
-    return OFAMobileNetV3(
-        width_mult=width_mult, depth_list=[4,5], expand_ratio_list=[2,3],
-        base_stage_width=[16, 32, 64, 128, 256, 320, 480, 512, 960]
-        # base_stage_width=[32, 64, 128, 256, 512, 512, 512, 960, 1024]
-    )
-
 def DeviceInfo(model):
     for name, p in model.named_parameters():
         if p.grad is not None:
@@ -46,34 +34,14 @@ def DeviceInfo(model):
         else:
             print(name, p.device, p.shape, None, None)
 
-class NASModel(BaseNASNetwork):
-    def __init__(self, model_init_func=None, is_search_inner=False, rank=None, mask=None):
-        super().__init__(mask)
+class NASModel(nn.Module):
+    def __init__(self):
+        super().__init__()
         self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False)
         self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
         self.conv3 = torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False)
-        # self.conv1 = OperationSpace(
-        #     [torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(3, 512, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(3, 512, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv1', mask=self.mask
-        # )
-        # self.conv2 = OperationSpace(
-        #     [torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(512, 1024, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv2', mask=self.mask
-        # )
-        # self.conv3 = OperationSpace(
-        #     [torch.nn.Conv2d(1024, 2048, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(1024, 2048, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(1024, 2048, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv3', mask=self.mask
-        # )
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
         self.fc = torch.nn.Linear(1024, 1000, bias=False)
-        self.is_search_inner = is_search_inner
-        self.rank = rank
         self.count = 0
 
     def forward(self, x):
@@ -102,7 +70,6 @@ def main():
         shard_strategy = TensorShardStrategy()
         # set_trace()
         with ZeroInitContext(target_device=torch.cuda.current_device(), shard_strategy=shard_strategy, shard_param=True) as ctx:
-            # model = get_ofa(4)
             model = NASModel()
         numel = ctx.model_numel_tensor.item()
         logger.info(f'Model numel: {numel}', ranks=[0])
@@ -110,11 +77,8 @@ def main():
         model = ShardedModelV2(model, shard_strategy, tensor_placement_policy='cpu', reuse_fp16_shard=True)
         logger.info(get_mem_info(prefix='After init model, '), ranks=[0])
     else:
-        # model = get_ofa(4).to(torch.cuda.current_device())
         model = NASModel()
         numel = sum([p.numel() for p in model.parameters()])
-    rm = RandomMutator(model)
-    rm.reset()
 
     # optimizer
     if use_zero:
@@ -129,7 +93,6 @@ def main():
         # we just use randomly generated data here
         x = torch.rand(2,3,64,64).to(torch.cuda.current_device())
         y = torch.rand(2, 1000).to(torch.cuda.current_device())
-        rm.reset()
         optimizer.zero_grad()
         start = time()
         outputs = model(x)
