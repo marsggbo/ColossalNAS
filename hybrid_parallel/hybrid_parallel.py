@@ -5,7 +5,7 @@ import colossalai
 import torch
 from colossalai.context import ParallelMode
 from colossalai.core import global_context as gpc
-from colossalai.logging import get_dist_logger
+from colossalai.logging import get_dist_logger, DistributedLogger
 from colossalai.nn import CrossEntropyLoss
 from colossalai.nn.lr_scheduler import CosineAnnealingWarmupLR
 from colossalai.utils import is_using_pp, get_dataloader
@@ -56,6 +56,7 @@ def get_darts():
     return DartsNetwork(in_channels=3, channels=24, n_classes=10, n_layers=24,
         n_nodes=4,stem_multiplier=5)
 
+
 class NASModel(BaseNASNetwork):
     def __init__(self, model_init_func=None, is_search_inner=False, rank=None, mask=None):
         super().__init__(mask)
@@ -83,46 +84,60 @@ class NASModel(BaseNASNetwork):
         self.rank = rank
 
     def forward(self, x):
-        print(x.shape)
+        # print(x.shape)
         out = self.conv1(x)
-        print(out.shape)
+        # print(out.shape)
         out = self.conv2(out)
-        print(out.shape)
+        # print(out.shape)
         out = self.conv3(out)
-        print(out.shape)
+        # print(out.shape)
         out = self.gavg(out).view(out.size(0), -1)
-        print(out.shape)
+        # print(out.shape)
         out = self.fc(out)
         return out
-        # if self.is_search_inner:
-        #     self.mutator.reset()
-        #     if self.rank is not None:
-        #         logger.info(f'Rank {self.rank}: arch={self.model.arch}')
-        # return self.model(x)
+
 
 class RSNet18(BaseNASNetwork):
     def __init__(self, mask=None):
         super().__init__(mask)
         self.conv1 = OperationSpace(
-            [torch.nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False),
-             torch.nn.Conv2d(3, 64, kernel_size=5, stride=1, padding=2, bias=False),
-             torch.nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=False),
+            [torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False),
+             torch.nn.Conv2d(3, 512, kernel_size=5, stride=1, padding=2, bias=False),
+             torch.nn.Conv2d(3, 512, kernel_size=7, stride=1, padding=3, bias=False),
             ], key='conv1'
         )
-        self.conv2 = torch.nn.Conv2d(64, 96, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv3 = torch.nn.Conv2d(96, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
+        # self.conv3 = torch.nn.Conv2d(1024, 1024, kernel_size=3, stride=1, padding=1, bias=False)
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
         self.fc = OperationSpace(
-            [torch.nn.Linear(512,10),torch.nn.Linear(512,10),torch.nn.Linear(512,10)], key='fc')
+            [torch.nn.Linear(1024,1024),torch.nn.Linear(1024,1024),torch.nn.Linear(1024,1024)], key='fc')
     def forward(self, x):
         out = self.conv1(x)
         out = self.conv2(out)
-        out = self.conv3(out)
+        # out = self.conv3(out)
         out = self.gavg(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
         return out
 
+
+def DeviceInfo(model, logger=None):
+    if logger is None:
+        logger = print
+    else:
+        logger = logger.info
+    logger('p.name, p.device, p.shape, p.grad.device, p.grad.shape')
+    infos = ""
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            grad_device, grad_shape = p.grad.device, p.grad.shape
+        else:
+            grad_device, grad_shape = None, None
+        if hasattr(p, 'colo_attr'):
+            infos += f"{name}, {p.device}, {p.colo_attr.data_payload.shape}, {grad_device}, {grad_shape}\n"
+        else:
+            infos += f"{name}, {p.device}, {p.shape}, {grad_device}, {grad_shape}\n"
+    logger(infos)
 
 def main():
     # initialize distributed setting
@@ -131,12 +146,13 @@ def main():
 
     # launch from torch
     colossalai.launch_from_torch(config=args.config)
+    grank = gpc.get_global_rank()
 
     # get logger
     logger = get_dist_logger()
+    logger.log_to_file(f'exp_1d/log_rank{grank}', mode='w')
     logger.info("initialized distributed environment", ranks=[0])
 
-    grank =gpc.get_global_rank()
 
     if hasattr(gpc.config, 'LOG_PATH'):
         if gpc.get_global_rank() == 0:
@@ -193,8 +209,10 @@ def main():
         logger.info(f"After pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
     else:
         # model = _create_vit_model(**model_kwargs)
-        model = get_ofa()
+        # model = get_ofa()
         # model = get_darts()
+        # model = NASModel()
+        model = RSNet18()
         rm = RandomMutator(model)
         logger.info(f"rank{grank} param size={sum(p.numel() for p in model.parameters())/1e6}MB")
 
@@ -252,9 +270,11 @@ def main():
         else:
             progress = range(len(train_dataloader))
             # progress = train_dataloader
-        for _ in progress:
+        for idx in progress:
+            if idx == 10:
+                break
             rm.reset()
-            logger.info(f"rank{grank} arch={rm._cache}")
+            # logger.info(f"rank{grank} arch={rm._cache}")
         # for idx, (imgs, labels) in enumerate(progress):
             # if rm is not None:
             #     rm.reset()
@@ -270,10 +290,11 @@ def main():
             # # logger.info(get_mem_info(prefix=f'[{idx+1}/{len(progress)}] Optimizer step '), ranks=[0])
             
             engine.zero_grad()
-            # rm.reset()
             engine.execute_schedule(data_iter, return_output_label=False)
             engine.step()
             lr_scheduler.step()
+            DeviceInfo(engine.model, logger)
+            logger.info(get_mem_info(prefix=f'[batch{idx+1}]'),)
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ from colossalai.amp import AMP_TYPE
 BATCH_SIZE = 16
 LEARNING_RATE = 3e-3
 WEIGHT_DECAY = 0.3
-NUM_EPOCHS = 10
+NUM_EPOCHS = 1
 WARMUP_EPOCHS = 3
 
 # large model config
@@ -32,13 +32,16 @@ SEQ_LENGTH = (IMG_SIZE // PATCH_SIZE) ** 2 + 1  # add 1 for cls token
 # SEQ_LENGTH = (IMG_SIZE // PATCH_SIZE)**2 + 1    # add 1 for cls token
 
 # parallel setting
-TENSOR_PARALLEL_SIZE = 1
-# TENSOR_PARALLEL_MODE = '1d'
-TENSOR_PARALLEL_MODE = '2d'
-
+ddp = 1
+TENSOR_PARALLEL_SIZE = 4
+TENSOR_PARALLEL_MODE = '1d'
+# TENSOR_PARALLEL_MODE = '2d'
+torch_ddp = dict(
+    find_unused_parameters=True
+)
 parallel = dict(
-    data=1,
-    pipeline=2,
+    data=ddp,
+    pipeline=1,
     tensor=dict(mode=TENSOR_PARALLEL_MODE, size=TENSOR_PARALLEL_SIZE),
 )
 
