@@ -3,9 +3,11 @@ import colossalai
 import psutil
 import torch
 import torch.nn as nn
+import colossalai
 from colossalai.logging import disable_existing_loggers, get_dist_logger
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.zero.init_ctx import ZeroInitContext
+from colossalai.core import global_context as gpc
 from colossalai.zero.shard_utils import TensorShardStrategy
 from colossalai.zero.sharded_model import ShardedModelV2
 from colossalai.zero.sharded_optim import ShardedOptimizerV2
@@ -88,33 +90,56 @@ class NASModel(BaseNASNetwork):
         return out
 
 def main():
-    BATCH_SIZE = 8
-    NUM_STEPS = 6
-    use_zero = True
-    # use_zero = False
-    disable_existing_loggers()
-    colossalai.launch_from_torch(config={})
-    logger = get_dist_logger()
+    BS = 64
+    NUM_STEPS = 20
+    parser = colossalai.get_default_parser()
+    parser.add_argument('--gpus', type=int, default=1)
+    parser.add_argument('--useZero', type=int, default=1) # 1: True 0: False
+    parser.add_argument('--searchspace', type=str, default='ofa_masks.pth') # 1: True 0: False
+    parser.add_argument('--debug', type=int, default=0) # 1: True 0: False
+    args = parser.parse_args()
+    # if args.get('config', None) is None:
+    if args.config is None:
+        args.config = {}
 
-    logger.info(get_mem_info(), ranks=[0])
-    # build GPT model
+    # launch from torch
+    colossalai.launch_from_torch(config=args.config)
+    grank = gpc.get_global_rank()
+    use_zero = args.useZero
+    gpus = args.gpus
+    searchspace_path = args.searchspace
+    searchspace = torch.load(searchspace_path)
+    debug = args.debug
+    # use_zero = False
+    if use_zero:
+        log_flag = 'zero'
+    else:
+        log_flag = 'ddp'
+    disable_existing_loggers()
+    logger = get_dist_logger()
+    logger.log_to_file(f'exp_{log_flag}_gpu{gpus}/log_rank{grank}', mode='w')
+    logger.info("initialized distributed environment")
+
+    logger.info(get_mem_info())
+    if debug:
+        set_trace()
+    # build NAS model
     if use_zero:
         shard_strategy = TensorShardStrategy()
-        # set_trace()
         with ZeroInitContext(target_device=torch.cuda.current_device(), shard_strategy=shard_strategy, shard_param=True) as ctx:
-            # model = get_ofa(4)
-            model = NASModel()
+            model = get_ofa(4)
+            # model = NASModel()
         numel = ctx.model_numel_tensor.item()
-        logger.info(f'Model numel: {numel}', ranks=[0])
+        logger.info(f'Model numel: {numel}')
         # Set tensor_placement_policy='cpu', which will offload params, grads and os
-        model = ShardedModelV2(model, shard_strategy, tensor_placement_policy='cpu', reuse_fp16_shard=True)
-        logger.info(get_mem_info(prefix='After init model, '), ranks=[0])
+        model = ShardedModelV2(model, shard_strategy, tensor_placement_policy='cuda', reuse_fp16_shard=True)
+        logger.info(get_mem_info(prefix='After init model, '))
     else:
-        # model = get_ofa(4).to(torch.cuda.current_device())
-        model = NASModel()
+        model = get_ofa(4).to(torch.cuda.current_device())
+        # model = NASModel()
         numel = sum([p.numel() for p in model.parameters()])
     rm = RandomMutator(model)
-    rm.reset()
+    # rm.reset()
 
     # optimizer
     if use_zero:
@@ -122,36 +147,44 @@ def main():
         optimizer = ShardedOptimizerV2(model, optimizer, initial_scale=2**5)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    logger.info(get_mem_info(prefix='After init optim, '), ranks=[0])
+    logger.info(get_mem_info(prefix='After init optim, '))
 
     model.train()
+    infos = '\nrank, batchIdx, batchTime, fw_g, bw_g, update_g, fw_c, bw_c, update_c\n'
     for n in range(NUM_STEPS):
         # we just use randomly generated data here
-        x = torch.rand(2,3,64,64).to(torch.cuda.current_device())
-        y = torch.rand(2, 1000).to(torch.cuda.current_device())
-        rm.reset()
+        x = torch.rand(BS, 3, 64, 64).to(torch.cuda.current_device())
+        y = torch.rand(BS, 1000).to(torch.cuda.current_device())
+        mask = searchspace[n]
+        rm.sample_by_mask(mask)
+        # rm.reset()
+        logger.info(f'rank: {grank}, mask: {mask}')
         optimizer.zero_grad()
         start = time()
         outputs = model(x)
         loss = (outputs-y).sum()
-        logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Forward '), ranks=[0])
-        print('before backward')
-        DeviceInfo(model)
+        fw_g, fw_c = get_gpu_mem(), get_cpu_mem()
+        # logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Forward '))
+        # print('before backward')
+        # DeviceInfo(model)
         if use_zero:
             optimizer.backward(loss)
         else:
             loss.backward()
-        print('after backward')
-        DeviceInfo(model)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Backward '), ranks=[0])
+        bw_g, bw_c = get_gpu_mem(), get_cpu_mem()
+        # print('after backward')
+        # DeviceInfo(model)
+        # logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Backward '))
         optimizer.step()
-        logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Optimizer step '), ranks=[0])
-        print('after step')
-        DeviceInfo(model)
+        update_g, update_c = get_gpu_mem(), get_cpu_mem()
+        # logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Optimizer step '))
+        # print('after step')
+        # DeviceInfo(model)
         step_time = time() - start
+        infos += f"{grank}, {n}, {step_time:.4f}, {fw_g:.4f}, {bw_g:.4f}, {update_g:.4f}, {fw_c:.4f}, {bw_c:.4f}, {update_c:.4f}\n"
         logger.info(
-            f'[{n+1}/{NUM_STEPS}] Loss:{loss.item():.3f}, Step time: {step_time:.3f}s', ranks=[0])
-
+            f'[{n+1}/{NUM_STEPS}] Loss:{loss.item():.3f}, Step time: {step_time:.3f}s')
+    logger.info(infos)
 
 if __name__ == '__main__':
     main()
