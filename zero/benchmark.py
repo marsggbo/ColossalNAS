@@ -42,7 +42,7 @@ from colossalai.zero.sharded_optim import ShardedOptimizerV2
 from hyperbox.mutator import RandomMutator
 
 from models import get_model
-from utils import get_peak_gpu_mem, get_gpu_mem, get_peak_gpu_mem, get_mem_info, DeviceInfo
+from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, get_mem_info, DeviceInfo
 
 
 def main():
@@ -181,12 +181,15 @@ def main():
     logger.info(get_mem_info(prefix='After init optim, '))
 
     model.train()
-    headers = 'rank, batchIdx, fw_g, bw_g, update_g, fw_c, bw_c, update_c, batch_time, fw_time, bw_time, update_time'
+    num_samples = 0.
+    used_time = 0.
+    headers = 'rank, batchIdx, fw_g, bw_g, update_g, fw_p, bw_p, update_p, batch_time, bacth_tp, fw_time, bw_time, update_time'
     headers = headers.split(', ')
     tab_info = PrettyTable(headers)
     size = int(args.img_size)
     x = torch.rand(batch_size, 3, size, size).to(grank)
     y = torch.rand(batch_size, 1000).to(grank)
+    
     for n in range(num_steps):
         # we just use randomly generated data here
         if searchspace is not None:
@@ -195,6 +198,7 @@ def main():
             logger.info(f'rank: {grank}, mask: {mask}')
         else:
             rm.reset()
+        
         optimizer.zero_grad(set_to_none=True)
         logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward '))
         batch_start = time()
@@ -204,8 +208,8 @@ def main():
         outputs = model(x)
         fw_end = time()
         loss = (outputs-y).sum()
-        fw_g, fw_c = get_gpu_mem(), get_peak_gpu_mem()
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward '))
+        fw_g, fw_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=grank))
 
         ### backward
         bw_start = time()
@@ -214,26 +218,35 @@ def main():
         else:
             loss.backward()
         bw_end = time()
-        bw_g, bw_c = get_gpu_mem(), get_peak_gpu_mem()
-        # DeviceInfo(model)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward '))
+        bw_g, bw_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=grank))
         
         ### update
         update_start = time()
         optimizer.step()
         update_end = time()
-        update_g, update_c = get_gpu_mem(), get_peak_gpu_mem()
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step '))
+        update_g, update_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=grank))
 
         batch_end = time()
+        
+        if n <= 2:
+            continue
+        # time
         batch_time = batch_end - batch_start
         fw_time = fw_end - fw_start
         bw_time = bw_end - bw_start
         update_time = update_end - update_start
-        # infos += f"{grank:6}, {n:9}, {batch_time:10,.4f}, {fw_g:10,.4f}, {bw_g:10,.4f}, {update_g:10,.4f}, {fw_c:10,.4f}, {bw_c:10,.4f}, {update_c:10,.4f}, {batch_time:10,.4f}, {fw_time:10,.4f}, {bw_time:10,.4f}, {update_time:10,.4f}\n"
-        data = [grank, n, fw_g, bw_g, update_g, fw_c, bw_c, update_c, batch_time, fw_time, bw_time, update_time]
+        
+        used_time += batch_time
+        num_samples += (batch_size * gpus)
+        batch_tp = gpus * batch_size / (batch_time + 1e-12) # batch throughput
+        
+        data = [grank, n, fw_g, bw_g, update_g, fw_c, bw_c, update_c, batch_time, batch_tp, fw_time, bw_time, update_time]
         data = [f'{d:.4f}' if isinstance(d, float) else d for d in data ]
         tab_info.add_row(data)
+    overall_tp = num_samples / (used_time + 1e-12)
+    logger.info(f'rank: {grank}, overall throughput: {overall_tp:.4f} samples/s')
     csv_info = tab_info.get_csv_string()
     columns = csv_info.split('\r\n')[0].split(',')
     values =[x.split(',') for x in csv_info.split('\r\n')[1:-1]]
@@ -252,12 +265,13 @@ def main():
         overall_info = []
         lines = csv_info.split('\r\n')[:-1]
         for idx, line in enumerate(lines):
-            if idx == 0:
+            line = line.split(',')
+            line.pop(1)
+            line = ','.join(line)
+            if idx in [0, len(lines) - 2, len(lines) - 1]:
                 overall_info.append(line)
-            elif idx == len(lines) - 2:
-                overall_info.append(line)
-            elif idx == len(lines) - 1:
-                overall_info.append(line)
+        line = ','.join(['TP', f"{overall_tp:.4f}"] + [''] * (len(overall_info[0].split(',')) - 2))
+        overall_info.append(line)
         overall_info = '\r\n'.join(overall_info)
         f.write(overall_info)
 
