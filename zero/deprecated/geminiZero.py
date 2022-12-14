@@ -1,3 +1,8 @@
+'''
+# https://github.com/hpcaitech/ColossalAI/blob/main/examples/language/gpt/train_gpt_demo.py
+# commit f7e276f 
+'''
+
 from functools import partial
 from time import time
 
@@ -5,17 +10,21 @@ import psutil
 import torch
 import torch.nn as nn
 from packaging import version
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import colossalai
 from colossalai.logging import disable_existing_loggers, get_dist_logger
 from colossalai.core import global_context as gpc
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.nn.parallel import ZeroDDP
+from colossalai.nn.optimizer.zero_optimizer import ZeroOptimizer
+from colossalai.nn.optimizer.gemini_optimizer import GeminiAdamOptimizer
 from colossalai.tensor import ColoParameter, ComputePattern, ComputeSpec, ProcessGroup, ShardSpec
 from colossalai.utils import get_current_device
 from colossalai.utils.model.colo_init_context import ColoInitContext
-from colossalai.zero import ZeroOptimizer
 from ipdb import set_trace
+from vit import ViT
+from hyperbox.mutator import RandomMutator
 
 def DeviceInfo(model):
     print('p.name, p.device, p.shape, p.grad.device, p.grad.shape')
@@ -53,6 +62,12 @@ class NASModel(nn.Module):
 def parse_args():
     parser = colossalai.get_default_parser()
     parser.add_argument(
+        "--distplan",
+        type=str,
+        default='colossalai',
+        help="The distributed plan [colossalai, ddp, zero].",
+    )
+    parser.add_argument(
         "--tp_degree",
         type=int,
         default=1,
@@ -69,6 +84,19 @@ def parse_args():
         type=int,
         default=0,
         help="Placement Policy for Gemini.",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default='vit',
+        help="model name.",
+    )
+    parser.add_argument(
+        "--shardinit",
+        type=bool,
+        default=False,
+        help=
+        "Shard the tensors when init the model to shrink peak memory size on the assigned device. Valid when using colossalai as dist plan.",
     )
     args = parser.parse_args()
     return args
@@ -100,6 +128,31 @@ def get_gpu_mem():
 
 def get_mem_info(prefix=''):
     return f'{prefix}GPU memory usage: {get_gpu_mem():.2f} MB, CPU memory usage: {get_cpu_mem():.2f} MB'
+
+
+def getVit(**kwargs):
+    model_kwargs = {
+        'image_size': 224,
+        'patch_size': 16,
+        'num_classes': 1000,
+        'dim': 1024,
+        'depth': 2, # 6
+        'heads': 1, # 16
+        'mlp_dim': 2048,
+        'dropout': 0.1,
+        'emb_dropout': 0.1,
+    }
+    model_kwargs.update(kwargs)
+    model = ViT(**model_kwargs)
+    return model
+
+def getModel(name, **kwargs):
+    if name == 'vit':
+        return getVit(**kwargs)
+    elif name == 'nas':
+        return NASModel()
+    else:
+        raise NotImplementedError
 
 
 # Tensor Parallel
@@ -160,61 +213,82 @@ def main():
         set_trace()
 
     BATCH_SIZE = 8
-    SEQ_LEN = 1024
-    VOCAB_SIZE = 50257
     NUM_STEPS = 10
 
     disable_existing_loggers()
     colossalai.launch_from_torch(config={})
     grank = gpc.get_global_rank()
 
-    pg = ProcessGroup(tp_degree=args.tp_degree)
-
     logger = get_dist_logger()
     logger.info(get_mem_info(), ranks=[0])
 
-    # build GPT model
-    with ColoInitContext(device=get_current_device()):
-        model = NASModel()
+    if args.distplan == "colossalai":
+        # all param must use the same process group.
+        default_pg = ProcessGroup(tp_degree=args.tp_degree)
+        default_dist_spec = ShardSpec([-1], [args.tp_degree]) if args.shardinit else None
 
-    numel = sum([p.numel() for p in model.parameters()])
-    logger.info(f'Model numel: {numel}', ranks=[0])
+        # build GPT model
+        with ColoInitContext(device='cpu', default_dist_spec=default_dist_spec, default_pg=default_pg):
+            model = getModel(args.model)
+            # model = getVit()
 
-    # Tensor Parallelism (TP)
-    tensor_parallelize(model, pg)
-    # Gemini + ZeRO DP, Note it must be used after TP
-    model = gemini_zero_dpp(model, pg, args.placement)
-    logger.info(get_mem_info(prefix='After init model, '), ranks=[0])
+        pg = default_pg
+        # Tensor Parallelism (TP)
+        tensor_parallelize(model, pg)
+        # Gemini + ZeRO DP, Note it must be used after TP
+        model = gemini_zero_dpp(model, pg, args.placement)
 
-    # build optimizer
-    optimizer = HybridAdam(model.parameters(), lr=1e-3)
-    optimizer = ZeroOptimizer(optimizer, model, initial_scale=2**5)
+        # build optimizer
+        optimizer = GeminiAdamOptimizer(model, lr=1e-3, initial_scale=2**5)
+        # optimizer = HybridAdam(model.parameters(), lr=1e-3)
+        # optimizer = ZeroOptimizer(optimizer, model, initial_scale=2**5)
+        logger.info(get_mem_info(prefix='After init optim, '), ranks=[0])
+
+    elif args.distplan == "ddp":
+        model = getModel(args.model).cuda()
+        ddp_model = DDP(model)
+        optimizer = torch.optim.Adam(ddp_model.parameters(), lr=0.01)
+
+    elif args.distplan == "zero":
+        from torch.distributed.optim import ZeroRedundancyOptimizer
+        model = getModel(args.model).cuda()
+        ddp_model = DDP(model)
+        optimizer = ZeroRedundancyOptimizer(ddp_model.parameters(), optimizer_class=torch.optim.Adam, lr=0.01)
+    else:
+        raise TypeError(f"{args.distplan} is error")
+
+    
     logger.info(get_mem_info(prefix='After init optim, '), ranks=[0])
 
     torch.cuda.synchronize()
     model.train()
+    rm = RandomMutator(model)
     for n in range(NUM_STEPS):
-        x = torch.rand(2,3,64,64).to(torch.cuda.current_device())
+        x = torch.rand(2,3,224,224).to(torch.cuda.current_device())
         y = torch.rand(2, 1000).to(torch.cuda.current_device())
         optimizer.zero_grad()
+        rm.reset()
         
         logger.info(f'rank {grank}: before foward')
-        DeviceInfo(model)
+        # DeviceInfo(model)
         start = time()
         outputs = model(x)
         loss = (outputs-y).sum()
         
         logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Forward '), ranks=[0])
         logger.info(f'rank {grank}: before backward')
-        DeviceInfo(model)
-        optimizer.backward(loss)
+        # DeviceInfo(model)
+        if args.distplan == "colossalai":
+            optimizer.backward(loss)
+        elif args.distplan in ["ddp", "zero"]:
+            loss.backward()
         logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Backward '), ranks=[0])
         logger.info(f'rank {grank}: before step')
-        DeviceInfo(model)
+        # DeviceInfo(model)
         optimizer.step()
         logger.info(get_mem_info(prefix=f'[{n+1}/{NUM_STEPS}] Optimizer step '), ranks=[0])
         logger.info(f'rank {grank}: after step')
-        DeviceInfo(model)
+        # DeviceInfo(model)
         step_time = time() - start
         logger.info(
             f'[{n+1}/{NUM_STEPS}] Loss:{loss.item():.3f}, Step time: {step_time:.3f}s',
