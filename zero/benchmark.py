@@ -56,6 +56,7 @@ def main():
     parser.add_argument('--bs', type=int, default=64) # batch size
     parser.add_argument('--img_size', type=int, default=64) # batch size
     parser.add_argument('--exp_name', type=str, default='') # 1: True 0: False
+    parser.add_argument('--placement', type=str, default='cuda') # 1: True 0: False
     parser.add_argument('--debug', type=int, default=0) # 1: True 0: False
     
     ### for colossalai only
@@ -71,6 +72,7 @@ def main():
     gpus = args.gpus
     debug = args.debug
     num_steps = args.steps
+    placement = args.placement
     exp_name = args.exp_name
     batch_size = args.bs
     img_size = args.img_size
@@ -99,7 +101,9 @@ def main():
             }
             args.config = {}
         colossalai.launch_from_torch(config=args.config)
-        grank = gpc.get_global_rank()
+        # grank = gpc.get_global_rank()
+        grank = int(os.environ['RANK'])
+        lrank = int(os.environ['LOCAL_RANK'])
         root_dir = f'{root_dir}/rank_{grank}'
         # init logger
         disable_existing_loggers()
@@ -108,6 +112,7 @@ def main():
     elif dist_backend in ['torch_ddp', 'torch_fsdp', 'torch_zero']:
         init_process_group(backend='nccl', init_method='env://')
         grank = torch.distributed.get_rank()
+        lrank = int(os.environ['LOCAL_RANK'])
         root_dir = f'{root_dir}/rank_{grank}'
         logger = loguru.logger
         logger.add(f'{root_dir}/rank_{grank}.log', format="{time} {level} {message}", level="INFO", enqueue=True, colorize=True)
@@ -123,22 +128,23 @@ def main():
         searchspace = None
 
     # init GPU/CPU memory
-    logger.info(get_mem_info())
+    logger.info(f"args: {args}")
+    logger.info(get_mem_info(rank=lrank))
 
     # build model
     if dist_backend == 'colossalai':
         if use_zero:
             shard_strategy = TensorShardStrategy() if args.shardstrategy == 'tss' else BucketTensorShardStrategy()
-            with ZeroInitContext(target_device=torch.cuda.current_device(), shard_strategy=shard_strategy, shard_param=True) as ctx:
+            with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
                 model = get_model(args.model)
             numel = ctx.model_numel_tensor.item()
             logger.info(f'Model numel: {numel}')
             # Set tensor_placement_policy='cpu', which will offload params, grads and os
-            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy='cuda', reuse_fp16_shard=True)
+            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_fp16_shard=True)
         else:
-            model = get_model(args.model).to(grank)
+            model = get_model(args.model).to(lrank)
     elif dist_backend in ['torch_ddp', 'torch_zero']:
-        model = get_model(args.model).to(grank)
+        model = get_model(args.model).to(lrank)
         model = DDP(model, find_unused_parameters=True, device_ids=[grank])
     elif dist_backend == 'torch_fsdp':
         my_auto_wrap_policy = partial(
@@ -151,7 +157,7 @@ def main():
             # Buffer precision.
             buffer_dtype=torch.float16,
         )
-        model = get_model(args.model).to(grank)
+        model = get_model(args.model).to(lrank)
         model = FSDP(
             model,
             auto_wrap_policy=my_auto_wrap_policy,
@@ -187,8 +193,8 @@ def main():
     headers = headers.split(', ')
     tab_info = PrettyTable(headers)
     size = int(args.img_size)
-    x = torch.rand(batch_size, 3, size, size).to(grank)
-    y = torch.rand(batch_size, 1000).to(grank)
+    x = torch.rand(batch_size, 3, size, size).to(lrank)
+    y = torch.rand(batch_size, 1000).to(lrank)
     
     for n in range(num_steps):
         # we just use randomly generated data here
@@ -200,7 +206,7 @@ def main():
             rm.reset()
         
         optimizer.zero_grad(set_to_none=True)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward '))
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
         batch_start = time()
         
         ### forward
@@ -208,8 +214,8 @@ def main():
         outputs = model(x)
         fw_end = time()
         loss = (outputs-y).sum()
-        fw_g, fw_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=grank))
+        fw_g, fw_c = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank))
 
         ### backward
         bw_start = time()
@@ -218,15 +224,15 @@ def main():
         else:
             loss.backward()
         bw_end = time()
-        bw_g, bw_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=grank))
+        bw_g, bw_c = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=lrank))
         
         ### update
         update_start = time()
         optimizer.step()
         update_end = time()
-        update_g, update_c = get_gpu_mem(grank), get_peak_gpu_mem(grank)
-        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=grank))
+        update_g, update_c = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+        logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=lrank))
 
         batch_end = time()
         
