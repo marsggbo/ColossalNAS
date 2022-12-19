@@ -163,22 +163,10 @@ def main():
 
     use_pipeline = is_using_pp()
 
-    # create model
-    model_kwargs = dict(img_size=gpc.config.IMG_SIZE,
-                        patch_size=gpc.config.PATCH_SIZE,
-                        hidden_size=gpc.config.HIDDEN_SIZE,
-                        depth=gpc.config.DEPTH,
-                        num_heads=gpc.config.NUM_HEADS,
-                        mlp_ratio=gpc.config.MLP_RATIO,
-                        num_classes=10,
-                        init_method='jax',
-                        checkpoint=gpc.config.CHECKPOINT)
-
     # set_trace()
     if use_pipeline:
         pipelinable = PipelinableContext()
         with pipelinable:
-            # model = _create_vit_model(**model_kwargs)
             # model = get_ofa()
             model = get_darts()
             # model = NASModel()
@@ -208,7 +196,6 @@ def main():
         logger.info(f"After Pipeline: rank{grank} arch={rm._cache}\n{model}")
         logger.info(f"After pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
     else:
-        # model = _create_vit_model(**model_kwargs)
         # model = get_ofa()
         # model = get_darts()
         # model = NASModel()
