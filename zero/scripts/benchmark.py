@@ -1,3 +1,4 @@
+import os
 
 dist_backends = [
     # 'torch_ddp',
@@ -5,25 +6,36 @@ dist_backends = [
     'colossalai'
 ]
 models = [
-    'vit',
+    # 'vit',
+    # 'vit_b',
+    # 'vit_h',
+    'vit_g',
     # 'darts',
     # 'ofa'
 ]
 gpus = [
-    1,
-    2, 
+    # 1,
+    # 2, 
     4
 ]
 batch_sizes = [
+    # 16,
+    # 32,
     # 64,
     # 128,
-    256,
-    # 512
+    # 256,
+    # 512,
+    # 640,
+    # 768,
+    1024,
+    # 2048,
+    # 4096,
+    # 9216,
 ]
 img_sizes = [32]
-use_zeros = [0, 1]
+use_zeros = [1]
 debug = 0
-steps = 20
+steps = 50
 exp_name = '_'
 
 command = '''
@@ -71,3 +83,4 @@ print(f"Total {len(commands)} commands")
 with open('./scripts/batch_benchmark.sh', 'w') as f:
     for command in commands:
         f.write(command)
+        os.system(command)
