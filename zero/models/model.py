@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from hyperbox_app.distributed.networks.ofa import OFAMobileNetV3
 from hyperbox.networks.darts import DartsNetwork
-from hyperbox.networks.vit import VisionTransformer, ViT_B
+from hyperbox.networks.vit import VisionTransformer, ViT_B, ViT_H, ViT_G
 from hyperbox.networks.base_nas_network import BaseNASNetwork
 from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.mutator import RandomMutator
@@ -81,11 +81,18 @@ class ToyNASModel(BaseNASNetwork):
         out = self.fc(out)
         return out
 
+
 def get_model(name, **kwargs):
     if name == 'ofa':
         return get_ofa(**kwargs)
     elif name == 'vit':
         return get_vit(**kwargs)
+    elif name == 'vit_b':
+        return ViT_B()
+    elif name == 'vit_h':
+        return ViT_H()
+    elif name == 'vit_g':
+        return ViT_G()
     elif name == 'darts':
         return get_darts(**kwargs)
     elif name == 'toy':
