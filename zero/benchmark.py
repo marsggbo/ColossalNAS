@@ -31,6 +31,7 @@ from torch.distributed.fsdp.wrap import (
 # Colossalai
 import colossalai
 from colossalai.logging import disable_existing_loggers, get_dist_logger
+## Colossalai Zero
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.zero.init_ctx import ZeroInitContext
 from colossalai.core import global_context as gpc
@@ -38,6 +39,11 @@ from colossalai.zero.shard_utils import (TensorShardStrategy,
                                          BucketTensorShardStrategy)
 from colossalai.zero.sharded_model import ShardedModelV2
 from colossalai.zero.sharded_optim import ShardedOptimizerV2
+## Colossalai Pipeline
+from colossalai.context import ParallelMode
+from colossalai.pipeline.pipelinable import PipelinableContext
+## Colossalai AMP (fp16)
+from colossalai.amp import AMP_TYPE
 
 from hyperbox.mutator import RandomMutator
 
@@ -51,7 +57,9 @@ def main():
     parser.add_argument('--dist_backend', type=str, default='colossalai') # colossalai, torch_ddp, torch_fsdp
     parser.add_argument('--gpus', type=int, default=1)
     parser.add_argument('--model', type=str, default='ofa')
+    parser.add_argument('--use_fp16', type=int, default=1) # 1: True 0: False
     parser.add_argument('--use_zero', type=int, default=1) # 1: True 0: False
+    parser.add_argument('--use_pipeline', type=int, default=1) # 1: True 0: False
     parser.add_argument('--steps', type=int, default=20) # number of steps
     parser.add_argument('--bs', type=int, default=64) # batch size
     parser.add_argument('--img_size', type=int, default=64) # batch size
@@ -68,7 +76,10 @@ def main():
     args = parser.parse_args()
     model = args.model
     dist_backend = args.dist_backend
+    use_pipeline = args.use_pipeline
     use_zero = args.use_zero
+    use_fp16 = args.use_fp16
+    assert not (use_zero and use_pipeline), 'use_zero and use_pipeline cannot be True at the same time'
     gpus = args.gpus
     debug = args.debug
     num_steps = args.steps
@@ -82,15 +93,30 @@ def main():
     
     date_of_run = datetime.now().strftime("%Y-%m-%d-%I:%M:%S_%p")
     root_dir = f'./logs/{model}/{dist_backend}_gpu{gpus}_{batch_size}x{img_size}x{img_size}_{exp_name}'
-    if dist_backend == 'colossalai' and use_zero:
-        root_dir += f'_zero_{shardstrategy}'
+    if dist_backend == 'colossalai':
+        if use_zero:
+            root_dir += f'_zero_{shardstrategy}'
+        elif use_pipeline:
+            root_dir += f'_pipeline'
+        elif use_fp16:
+            root_dir += f'_fp16'
     root_dir += f'/{date_of_run}'
     # init bacekend
     if dist_backend == 'colossalai':
+        args.config = {}
         if use_zero:
             args.config = {}
+        elif use_pipeline:
+            args.config.update({
+                'torch_ddp': {
+                    'find_unused_parameters': True,
+                },
+                'parallel': {
+                    'pipeline': args.gpus,
+                }
+            })
         else:
-            args.config = {
+            args.config.update({
                 'torch_ddp': {
                     'find_unused_parameters': True,
                 },
@@ -98,8 +124,12 @@ def main():
                     'data': args.gpus,
                     'pipeline': 1,
                 }
-            }
-            args.config = {}
+            })
+            # args.config = {}
+        if use_fp16:
+            args.config['fp16'] = dict(
+                mode=AMP_TYPE.NAIVE,
+            )
         colossalai.launch_from_torch(config=args.config)
         # grank = gpc.get_global_rank()
         grank = int(os.environ['RANK'])
@@ -140,7 +170,19 @@ def main():
             numel = ctx.model_numel_tensor.item()
             logger.info(f'Model numel: {numel}')
             # Set tensor_placement_policy='cpu', which will offload params, grads and os
-            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_fp16_shard=True)
+            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)
+        elif use_pipeline:
+            # Todo: add pipeline
+            pipelinable = PipelinableContext()
+            with pipelinable:
+                model = get_model(args.model)
+            exec_seq = ['conv1', 'conv2', 'gavg', 
+                        (lambda x: torch.flatten(x, 1), "behind"), 'fc']
+            pipelinable.to_layer_list(exec_seq)
+            # pipelinable.to_layer_list()
+            # pipelinable.policy = "uniform"
+            pipelinable.policy = "balanced"
+            model = pipelinable.partition(1, gpc.pipeline_parallel_size, gpc.get_local_rank(ParallelMode.PIPELINE))
         else:
             model = get_model(args.model).to(lrank)
     elif dist_backend in ['torch_ddp', 'torch_zero']:
@@ -168,6 +210,7 @@ def main():
             device_id=grank,
         )
         # model = DDP(model, find_unused_parameters=True, device_ids=[grank], output_device=grank)
+
     logger.info(f"Bulding model: {args.model}")
     params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model params: {params}")
@@ -196,6 +239,14 @@ def main():
     x = torch.rand(batch_size, 3, size, size).to(lrank)
     y = torch.rand(batch_size, 1000).to(lrank)
     
+    if dist_backend=='colossalai' and use_fp16:
+        criterion = lambda x, y: (x-y).sum()
+        engine, _, _, _ = colossalai.initialize(
+            model, optimizer, criterion, None,
+        )
+    else:
+        engine = None
+    
     for n in range(num_steps):
         # we just use randomly generated data here
         if searchspace is not None:
@@ -205,22 +256,27 @@ def main():
         else:
             rm.reset()
         
-        optimizer.zero_grad(set_to_none=True)
+        engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
         logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
         batch_start = time()
         
         ### forward
         fw_start = time()
-        outputs = model(x)
+        outputs = model(x) if engine is None else engine(x)
         fw_end = time()
-        loss = (outputs-y).sum()
+        loss = (outputs-y).sum() if engine is None else engine.criterion(outputs, y)
         fw_g, fw_c = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
         logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank))
 
         ### backward
         bw_start = time()
-        if dist_backend == 'colossalai' and use_zero:
-            optimizer.backward(loss)
+        if dist_backend == 'colossalai':
+            if use_zero:
+                optimizer.backward(loss)
+            elif engine is not None:
+                engine.backward(loss)
+            else:
+                loss.backward()
         else:
             loss.backward()
         bw_end = time()
@@ -229,7 +285,7 @@ def main():
         
         ### update
         update_start = time()
-        optimizer.step()
+        optimizer.step() if engine is None else engine.step()
         update_end = time()
         update_g, update_c = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
         logger.info(get_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=lrank))
