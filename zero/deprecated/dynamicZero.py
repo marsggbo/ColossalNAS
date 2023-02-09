@@ -29,16 +29,16 @@ def get_mem_info(prefix=''):
     return f'{prefix}GPU memory usage: {get_gpu_mem():.2f} MB, CPU memory usage: {get_cpu_mem():.2f} MB'
 
 def DeviceInfo(model):
-    print('p.name, p.device, p.shape, p.grad.device, p.grad.shape')
+    print('p.name, p.dtype, p.shape, p.grad.dtype, p.grad.shape')
     for name, p in model.named_parameters():
         if p.grad is not None:
-            grad_device, grad_shape = p.grad.device, p.grad.shape
+            grad_device, grad_shape = p.grad.dtype, p.grad.shape
         else:
             grad_device, grad_shape = None, None
         if hasattr(p, 'colo_attr'):
-            print(name, p.device, p.colo_attr.data_payload.shape, grad_device, grad_shape)
+            print(name, p.dtype, p.colo_attr.data_payload.shape, grad_device, grad_shape)
         else:
-            print(name, p.device, p.shape, grad_device, grad_shape)
+            print(name, p.dtype, p.shape, grad_device, grad_shape)
 
 class NASModel(nn.Module):
     def __init__(self):
@@ -63,7 +63,7 @@ class NASModel(nn.Module):
 
 def main():
     BATCH_SIZE = 8
-    NUM_STEPS = 3
+    NUM_STEPS = 50
     use_zero = True
     # use_zero = False
     disable_existing_loggers()
@@ -75,7 +75,7 @@ def main():
     # build GPT model
     if use_zero:
         shard_strategy = TensorShardStrategy()
-        # set_trace()
+        set_trace()
         with ZeroInitContext(target_device=torch.cuda.current_device(), shard_strategy=shard_strategy, shard_param=True) as ctx:
             model = NASModel()
         numel = ctx.model_numel_tensor.item()

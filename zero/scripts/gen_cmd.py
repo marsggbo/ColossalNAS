@@ -21,12 +21,12 @@ gpus = [
 ]
 batch_sizes = [
     # 16,
-    # 32,
+    32,
     # 64,
-    128,
-    256,
-    512,
-    640,
+    # 128,
+    # 256,
+    # 512,
+    # 640,
     # 768,
     # 1024,
     # 2048,
@@ -43,8 +43,8 @@ use_pipelines = [
     0,
     # 1,
 ]
-use_fp16 = [
-    # 0,
+use_fp16s = [
+    0,
     1,
 ]
 debug = 0
@@ -90,7 +90,9 @@ for model in models:
                             params.update({'use_zero': use_zero})
                             for use_pipeline in use_pipelines:
                                 params.update({'use_pipeline': use_pipeline})
-                                param_set.append(params.copy())
+                                for use_fp16 in use_fp16s:
+                                    params.update({'use_fp16': use_fp16})
+                                    param_set.append(params.copy())
                     else:
                         param_set.append(params.copy())
 
@@ -99,9 +101,9 @@ for param in param_set:
     commands.append(command.format(**param))
 for i, command in enumerate(commands):
     print(i, command)
-    os.system(command)
+    # os.system(command)
 print(f"Total {len(commands)} commands")
 with open('./scripts/batch_benchmark.sh', 'w') as f:
     for command in commands:
         f.write(command)
-        os.system(command)
+        # os.system(command)

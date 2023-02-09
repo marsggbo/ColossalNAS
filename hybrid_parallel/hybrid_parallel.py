@@ -32,7 +32,9 @@ from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.networks.base_nas_network import BaseNASNetwork
 from hyperbox.networks.darts import DartsNetwork
 from hyperbox.networks.spos import ShuffleNASNetV2
+from hyperbox.networks.vit import VisionTransformer, ViT_B, ViT_H, ViT_G
 from hyperbox.mutator import RandomMutator
+
 
 def get_cpu_mem():
     return psutil.Process().memory_info().rss / 1024**2
@@ -107,14 +109,14 @@ class RSNet18(BaseNASNetwork):
             ], key='conv1'
         )
         self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
-        # self.conv3 = torch.nn.Conv2d(1024, 1024, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv3 = torch.nn.Conv2d(1024, 1024, kernel_size=3, stride=1, padding=1, bias=False)
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
         self.fc = OperationSpace(
             [torch.nn.Linear(1024,1024),torch.nn.Linear(1024,1024),torch.nn.Linear(1024,1024)], key='fc')
     def forward(self, x):
         out = self.conv1(x)
         out = self.conv2(out)
-        # out = self.conv3(out)
+        out = self.conv3(out)
         out = self.gavg(out)
         out = out.view(out.size(0), -1)
         out = self.fc(out)
@@ -168,24 +170,31 @@ def main():
         pipelinable = PipelinableContext()
         with pipelinable:
             # model = get_ofa()
-            model = get_darts()
+            # model = get_darts()
             # model = NASModel()
             # model = resnet18()
             # model = RSNet18()
+            model = ViT_B(depth=1, heads=1, search_ratio=[0.5, 1])
             # rm = RandomMutator(model)
             # model = NASModel(get_ofa, is_search_inner=True)
             # rm = None
+        logger.info('============printing model============')
+        logger.info(model)
+        logger.info('============printing model============')
+        # RSNet18
         # exec_seq = ['conv1', 'conv2', 'conv3', 'gavg',
         #     (lambda x: torch.flatten(x, 1), "behind"), 'fc']
         exec_seq = [
-        'conv1', 'conv2', 'conv3', 'gavg',
-        (lambda x: torch.flatten(x, 1), "behind"), 'fc']
+            'to_patch_embedding',
+            (lambda x)
+        ]
+        # resnet18
         # exec_seq = [
         # 'conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool',
         # (lambda x: torch.flatten(x, 1), "behind"), 'fc']
         # pipelinable.to_layer_list(exec_seq)
-        logger.info(f"Before Pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
         pipelinable.to_layer_list()
+        logger.info(f"Before Pipeline: rank{grank} Pipeline param size={sum(p.numel() for p in model.parameters())/1e6}MB")
         pipelinable.policy = "uniform"
         # pipelinable.policy = "balanced"
         model = pipelinable.partition(1, gpc.pipeline_parallel_size, gpc.get_local_rank(ParallelMode.PIPELINE))

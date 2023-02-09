@@ -39,30 +39,33 @@ def get_ofa(**kwargs):
     return OFAMobileNetV3(**default_config)
 
 
-class ToyNASModel(BaseNASNetwork):
+class ToyNASModel2(BaseNASNetwork):
     def __init__(self, model_init_func=None, is_search_inner=False, rank=None, mask=None):
         super().__init__(mask)
-        self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
-        # self.conv3 = torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False)
-        # self.conv1 = OperationSpace(
-        #     [torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(3, 512, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(3, 512, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv1', mask=self.mask
-        # )
-        # self.conv2 = OperationSpace(
-        #     [torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(512, 1024, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv2', mask=self.mask
-        # )
-        # self.conv3 = OperationSpace(
-        #     [torch.nn.Conv2d(1024, 2048, kernel_size=3, stride=1, padding=1, bias=False),
-        #      torch.nn.Conv2d(1024, 2048, kernel_size=5, stride=1, padding=2, bias=False),
-        #     #  torch.nn.Conv2d(1024, 2048, kernel_size=7, stride=1, padding=3, bias=False),
-        #     ], key='conv3', mask=self.mask
-        # )
+        self.flag = 2
+        if self.flag==1:
+            self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False)
+            self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
+            self.conv3 = torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False)
+        else:
+            self.conv1 = OperationSpace(
+                [torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False),
+                torch.nn.Conv2d(3, 512, kernel_size=5, stride=1, padding=2, bias=False),
+                torch.nn.Conv2d(3, 512, kernel_size=7, stride=1, padding=3, bias=False),
+                ], key='conv1', mask=self.mask
+            )
+            self.conv2 = OperationSpace(
+                [torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False),
+                torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False),
+                torch.nn.Conv2d(512, 1024, kernel_size=7, stride=1, padding=3, bias=False),
+                ], key='conv2', mask=self.mask
+            )
+            self.conv3 = OperationSpace(
+                [torch.nn.Conv2d(1024, 2048, kernel_size=3, stride=1, padding=1, bias=False),
+                 torch.nn.Conv2d(1024, 2048, kernel_size=5, stride=1, padding=2, bias=False),
+                #  torch.nn.Conv2d(1024, 2048, kernel_size=7, stride=1, padding=3, bias=False),
+                ], key='conv3', mask=self.mask
+            )
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
         self.fc = torch.nn.Linear(1024, 1000, bias=False)
         self.is_search_inner = is_search_inner
@@ -71,16 +74,39 @@ class ToyNASModel(BaseNASNetwork):
 
     def forward(self, x):
         out = self.conv1(x)
-        out = self.conv2(out)
-        # if self.count % 2 == 0:
-        #     out = self.conv2(out)
-        # else:
-        #     out = self.conv3(out)
+        if self.flag==1:
+            if self.count % 2 == 0:
+                out = self.conv2(out)
+            else:
+                out = self.conv3(out)
+        else:
+            out = self.conv2(out)
         self.count += 1
         out = self.gavg(out).view(out.size(0), -1)
         out = self.fc(out)
         return out
 
+
+class ToyNASModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
+        self.conv3 = torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False)
+        self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = torch.nn.Linear(1024, 1000, bias=False)
+        self.count = 0
+
+    def forward(self, x):
+        out = self.conv1(x)
+        if self.count % 2 == 0:
+            out = self.conv2(out)
+        else:
+            out = self.conv3(out)
+        self.count += 1
+        out = self.gavg(out).view(out.size(0), -1)
+        out = self.fc(out)
+        return out
 
 def get_model(name, **kwargs):
     if name == 'ofa':
@@ -97,5 +123,7 @@ def get_model(name, **kwargs):
         return get_darts(**kwargs)
     elif name == 'toy':
         return ToyNASModel()
-    else:
+    elif name == 'resnet18':
         return models.resnet18()
+    elif name == 'resnet152':
+        return models.resnet152()
