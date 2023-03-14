@@ -6,12 +6,14 @@ dist_backends = [
     'colossalai'
 ]
 models = [
-    # 'vit',
+    # 'vit_s',
     # 'vit_b',
-    # 'vit_h',
-    'vit_g',
+    'vit_h',
+    # 'vit_g',
+    # 'vit_10b',
     # 'darts',
     # 'ofa'
+    # 'mobilenet',
     # 'resnet152'
 ]
 gpus = [
@@ -20,9 +22,10 @@ gpus = [
     4
 ]
 batch_sizes = [
+    # 8,
     # 16,
-    32,
-    # 64,
+    # 32,
+    64,
     # 128,
     # 256,
     # 512,
@@ -32,16 +35,20 @@ batch_sizes = [
     # 2048,
     # 3200,
     # 4096,
-    # 9216,
+    # 8192,/
 ]
-img_sizes = [32]
+img_sizes = [
+    # 32,
+    128,
+    # 224,
+]
 use_zeros = [
     0,
-    # 1,
+    1,
 ]
 use_pipelines = [
     0,
-    # 1,
+    1,
 ]
 use_fp16s = [
     0,
@@ -60,7 +67,7 @@ torchrun --nproc_per_node={gpus} benchmark.py \
 --use_pipeline {use_pipeline} \
 --use_fp16 {use_fp16} \
 --steps {steps} \
---bs {bs} \
+--batch_size {batch_size} \
 --img_size {img_size} \
 --exp_name {exp_name} \
 --debug {debug} 
@@ -70,13 +77,13 @@ param_set = []
 for model in models:
     for dist_backend in dist_backends:
         for gpu in gpus:
-            for bs in batch_sizes:
+            for batch_size in batch_sizes:
                 for img_size in img_sizes:
                     params = {
                         'model': model,
                         'dist_backend': dist_backend,
                         'gpus': gpu,
-                        'bs': bs,
+                        'batch_size': batch_size,
                         'img_size': img_size,
                         'use_zero': 0,
                         'steps': steps,
@@ -89,8 +96,12 @@ for model in models:
                         for use_zero in use_zeros:
                             params.update({'use_zero': use_zero})
                             for use_pipeline in use_pipelines:
+                                if use_zero == 1 and use_pipeline == 1:
+                                    continue
                                 params.update({'use_pipeline': use_pipeline})
                                 for use_fp16 in use_fp16s:
+                                    if (use_zero == 1 or use_pipeline == 1) and use_fp16 == 1:
+                                        continue
                                     params.update({'use_fp16': use_fp16})
                                     param_set.append(params.copy())
                     else:

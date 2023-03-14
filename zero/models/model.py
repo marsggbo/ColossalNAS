@@ -1,25 +1,28 @@
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 
 from hyperbox_app.distributed.networks.ofa import OFAMobileNetV3
+from hyperbox.networks.ofa import OFAMobileNetV3
 from hyperbox.networks.darts import DartsNetwork
-from hyperbox.networks.vit import VisionTransformer, ViT_B, ViT_H, ViT_G
+from hyperbox.networks.vit import *
+from hyperbox.networks.mobilenet.mobile_net import MobileNet
 from hyperbox.networks.base_nas_network import BaseNASNetwork
 from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.mutator import RandomMutator
 
-from .vit import ViT
 from torchvision import models
 
 
-def get_vit(**kwargs):
+def get_vit(cls=VisionTransformer, **kwargs):
     default_config = {
         'image_size': 224, 'patch_size': 16, 'num_classes': 1000, 'dim': 1024, 
         'depth': 6, 'heads': 16, 'dim_head': 1024, 'mlp_dim': 2048
     }
     default_config.update(kwargs)
-    return ViT(**default_config)
+    return cls(**default_config)
 
 def get_darts(**kwargs):
     default_config = {
@@ -32,7 +35,8 @@ def get_darts(**kwargs):
 def get_ofa(**kwargs):
     default_config = {
         'width_mult': 1.0, 'depth_list': [4,5], 'expand_ratio_list': [2,3],
-        'base_stage_width': [16, 32, 64, 128, 256, 320, 480, 512, 960]
+        'base_stage_width': [16, 32, 64, 128, 256, 320, 480, 512, 960],
+        'to_search_depth': False
     }
     # base_stage_width=[32, 64, 128, 256, 512, 512, 512, 960, 1024]
     default_config.update(kwargs)
@@ -108,7 +112,23 @@ class ToyNASModel(nn.Module):
         out = self.fc(out)
         return out
 
+
+name2model = {
+    'ofa': get_ofa,
+    'vit_s': ViT_S,
+    'vit_b': ViT_B,
+    'vit_h': ViT_H,
+    'vit_g': ViT_G,
+    'vit_10b': ViT_10B,
+    'darts': get_darts,
+    'toy': ToyNASModel,
+    'mobilenet': MobileNet,
+    'resnet18': models.resnet18,
+    'resnet152': models.resnet152,
+}
+
 def get_model(name, **kwargs):
+    return name2model[name](**kwargs)
     if name == 'ofa':
         return get_ofa(**kwargs)
     elif name == 'vit':
@@ -127,3 +147,8 @@ def get_model(name, **kwargs):
         return models.resnet18()
     elif name == 'resnet152':
         return models.resnet152()
+
+
+if __name__ == '__main__':
+    net = get_model('ofa')
+    
