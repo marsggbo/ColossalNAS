@@ -262,10 +262,11 @@ def main():
     size = int(args.img_size)
     
     # loader = get_fake_dataloader(3000000000, size, batch_size)
-    loader = get_cifar10_dataloader(batch_size)
+    train_loader, test_loader = get_cifar10_dataloader(batch_size)
+    loader = train_loader
 
     if dist_backend=='colossalai':
-        criterion = lambda x, y: (x-y).sum()
+        criterion = torch.nn.CrossEntropyLoss()
         engine, _, _, _ = colossalai.initialize(
             model, optimizer, criterion, None,
         )
@@ -290,7 +291,7 @@ def main():
             fw_start = time()
             outputs = model(x) if engine is None else engine(x)
             fw_end = time()
-            loss = (outputs-y).sum() if engine is None else engine.criterion(outputs, y)
+            loss = criterion(outputs, y) if engine is None else engine.criterion(outputs, y)
             fw_g, fw_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
             logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank))
 
