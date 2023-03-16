@@ -7,7 +7,7 @@ dist_backends = [
 ]
 models = [
     # 'vit_s',
-    'vit_b',
+    # 'vit_b',
     'vit_h',
     # 'vit_g',
     # 'vit_10b',
@@ -19,7 +19,8 @@ models = [
 gpus = [
     1,
     # 2,
-    4
+    4,
+    8
 ]
 batch_sizes = [
     # 8,
@@ -28,11 +29,11 @@ batch_sizes = [
     # 64,
     # 128,
     # 256,
-    # 512,
+    512,
     # 640,
     # 768,
     # 832,
-    1024,
+    # 1024,
     # 2048,
     # 3200,
     # 4096,
@@ -52,7 +53,7 @@ use_pipelines = [
     1,
 ]
 use_fp16s = [
-    0,
+    # 0,
     1,
 ]
 nofs = [
@@ -72,6 +73,7 @@ torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0
 --use_zero {use_zero} \
 --use_pipeline {use_pipeline} \
 --use_fp16 {use_fp16} \
+--nof {nof} \
 --steps {steps} \
 --batch_size {batch_size} \
 --img_size {img_size} \
@@ -132,7 +134,7 @@ for i, command in enumerate(commands):
     print(i, command)
     # os.system(command)
 print(f"Total {len(commands)} commands")
-with open('./scripts/batch_benchmark2.sh', 'w') as f:
+with open('./scripts/batch_benchmark.sh', 'w') as f:
     for command in commands:
         f.write(command)
         # os.system(command)
