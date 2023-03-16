@@ -49,7 +49,7 @@ from colossalai.amp import AMP_TYPE
 
 from hyperbox.mutator import RandomMutator
 
-from dataloader import get_fake_dataloader, get_cifar10_loader
+from dataloader import get_fake_dataloader, get_cifar10_dataloader
 from models import get_model
 from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo
 
