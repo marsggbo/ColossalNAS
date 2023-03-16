@@ -1,6 +1,7 @@
 import os
-
+import json
 import loguru
+import numpy as np
 import pandas as pd
 from time import time
 from functools import partial
@@ -57,10 +58,11 @@ def get_args():
     parser.add_argument('--dist_backend', type=str, default='colossalai') # colossalai, torch_ddp, torch_fsdp
     parser.add_argument('--gpus', type=int, default=1)
     parser.add_argument('--model', type=str, default='ofa')
+    parser.add_argument('--nof', type=float, default=0.) # nvme offload fraction, a value between 0. and 1.
     parser.add_argument('--use_fp16', type=int, default=1) # 1: True 0: False
     parser.add_argument('--use_zero', type=int, default=1) # 1: True 0: False
     parser.add_argument('--use_pipeline', type=int, default=1) # 1: True 0: False
-    parser.add_argument('--steps', type=int, default=20) # number of steps
+    parser.add_argument('--steps', type=int, default=100) # number of steps
     parser.add_argument('--img_size', type=int, default=224) # img size
     parser.add_argument('--batch_size', type=int, default=64) # batch size
     parser.add_argument('--exp_name', type=str, default='') # 1: True 0: False
@@ -74,6 +76,13 @@ def get_args():
     args = parser.parse_args()
     return args
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def main():
     args = get_args()
@@ -91,26 +100,30 @@ def main():
     exp_name = args.exp_name
     img_size = args.img_size
     shardstrategy = args.shardstrategy
+    nof = args.nof
+    seed = args.seed
+    set_seed(seed)    
+    
     if debug:
         set_trace()
     
     date_of_run = datetime.now().strftime("%Y-%m-%d-%I:%M:%S_%p")
-    root_dir = f'./logs/{model}/{dist_backend}_gpu{gpus}_{batch_size}x{img_size}x{img_size}_{exp_name}'
+    root_dir = f'./logs/{model}/{dist_backend}_gpu{gpus}_{batch_size}x{img_size}x{img_size}'
     if dist_backend == 'colossalai':
         if use_zero:
-            root_dir += f'_zero_{shardstrategy}'
-        elif use_pipeline:
+            root_dir += f'_zero_{shardstrategy}_nof{nof}'
+        if use_pipeline:
             root_dir += f'_pipeline'
-        elif use_fp16:
+        if use_fp16:
             root_dir += f'_fp16'
-    root_dir += f'/{date_of_run}'
+    root_dir += f'_{exp_name}/{date_of_run}'
 
     # init bacekend
     if dist_backend == 'colossalai':
         args.config = {}
         if use_zero:
             args.config = {}
-        elif use_pipeline:
+        if use_pipeline:
             args.config.update({
                 'torch_ddp': {
                     'find_unused_parameters': True,
@@ -151,6 +164,12 @@ def main():
         logger = loguru.logger
         logger.add(f'{root_dir}/rank_{grank}.log', format="{time} {level} {message}", level="INFO", enqueue=True, colorize=True)
     logger.info(f'rank[{grank}] using backend: {dist_backend}')
+
+    # save args
+    with open(os.path.join(root_dir, 'args.json'), 'w') as f:
+        if 'fp16' in args.config:
+            args.config['fp16']['mode'] = str(args.config['fp16']['mode'])
+        json.dump(args.__dict__, f, indent=4)
     
     # init GPU/CPU memory
     logger.info(f"rank[{grank}] args: {args}")
@@ -214,7 +233,7 @@ def main():
 
     # build optimizer
     if dist_backend == 'colossalai' and use_zero:
-        optimizer = HybridAdam(model.parameters(), lr=1e-3)
+        optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nvme_offload_fraction)
         optimizer = ShardedOptimizerV2(model, optimizer, initial_scale=2**5)
     elif dist_backend == 'torch_zero':
         optimizer = ZeroRedundancyOptimizer(
@@ -234,7 +253,7 @@ def main():
     tab_info = PrettyTable(headers)
     size = int(args.img_size)
     
-    loader = get_fake_dataloader(300000, size, batch_size)
+    loader = get_fake_dataloader(3000000000, size, batch_size)
     data_iter = iter(loader)
 
     if dist_backend=='colossalai':
@@ -247,15 +266,16 @@ def main():
     
     for n in range(num_steps):
         rm.reset()
+        logger.info(f"{n}: {model.arch}")
         
         engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
         logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
-        batch_start = time()
         
         (x, y) = data_iter.next()
         x = x.to(lrank)
         y = y.to(lrank)
         
+        batch_start = time()
         if not use_pipeline:
             ### forward
             fw_start = time()
@@ -301,7 +321,7 @@ def main():
         batch_end = time()
         batch_time = batch_end - batch_start
         
-        if n <= 2:
+        if n <= 5:
             continue
 
         # time
