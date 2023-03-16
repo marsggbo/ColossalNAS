@@ -272,14 +272,15 @@ def main():
     else:
         engine = None
     
-    for n in range(num_steps):
+    for n,  (x, y) in enumerate(data_iter):
+        if n >= num_steps:
+            break
         rm.reset()
         logger.info(f"{n}: {model.arch}")
         
         engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
         logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
         
-        (x, y) = data_iter.__next__()
         x = x.to(lrank)
         y = y.to(lrank)
         
