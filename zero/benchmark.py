@@ -1,6 +1,7 @@
 import os
 import json
 import loguru
+import atexit
 import numpy as np
 import pandas as pd
 from time import time
@@ -53,6 +54,12 @@ from models import get_model
 from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo
 
 
+logger = loguru.logger
+@atexit.register
+def exit_handler():
+    global logger
+    logger.info("exit with error")
+    
 def get_args():
     parser = colossalai.get_default_parser()
     parser.add_argument('--dist_backend', type=str, default='colossalai') # colossalai, torch_ddp, torch_fsdp
@@ -85,6 +92,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 def main():
+    global logger
     args = get_args()
     batch_size = args.batch_size
     model = args.model
@@ -371,4 +379,7 @@ def parse_tab_info(tab_info, overall_tp, logger, root_dir):
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.info(e)
