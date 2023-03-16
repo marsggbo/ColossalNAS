@@ -49,7 +49,7 @@ from colossalai.amp import AMP_TYPE
 
 from hyperbox.mutator import RandomMutator
 
-from dataloader import get_fake_dataloader
+from dataloader import get_fake_dataloader, get_cifar10_loader
 from models import get_model
 from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo
 
@@ -261,7 +261,8 @@ def main():
     tab_info = PrettyTable(headers)
     size = int(args.img_size)
     
-    loader = get_fake_dataloader(3000000000, size, batch_size)
+    # loader = get_fake_dataloader(3000000000, size, batch_size)
+    loader = get_cifar10_dataloader(batch_size)
 
     if dist_backend=='colossalai':
         criterion = lambda x, y: (x-y).sum()
