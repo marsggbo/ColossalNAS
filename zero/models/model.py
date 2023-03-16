@@ -3,17 +3,16 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+from torchvision import models
 
-from hyperbox_app.distributed.networks.ofa import OFAMobileNetV3
-from hyperbox.networks.ofa import OFAMobileNetV3
-from hyperbox.networks.darts import DartsNetwork
-from hyperbox.networks.vit import *
-from hyperbox.networks.mobilenet.mobile_net import MobileNet
 from hyperbox.networks.base_nas_network import BaseNASNetwork
 from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.mutator import RandomMutator
 
-from torchvision import models
+from hyperbox.networks.ofa import OFAMobileNetV3
+from hyperbox.networks.darts import DartsNetwork
+from hyperbox.networks.vit import *
+from hyperbox.networks.mobilenet.mobile_net import MobileNet
 
 
 def get_vit(cls=VisionTransformer, **kwargs):
