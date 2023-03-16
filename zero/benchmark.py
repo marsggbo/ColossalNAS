@@ -262,7 +262,6 @@ def main():
     size = int(args.img_size)
     
     loader = get_fake_dataloader(3000000000, size, batch_size)
-    data_iter = iter(loader)
 
     if dist_backend=='colossalai':
         criterion = lambda x, y: (x-y).sum()
@@ -272,7 +271,7 @@ def main():
     else:
         engine = None
     
-    for n,  (x, y) in enumerate(data_iter):
+    for n,  (x, y) in enumerate(loader):
         if n >= num_steps:
             break
         rm.reset()
