@@ -58,7 +58,7 @@ logger = loguru.logger
 @atexit.register
 def exit_handler():
     global logger
-    logger.info("exit with error")
+    logger.info("exit with no error")
     
 def get_args():
     parser = colossalai.get_default_parser()
@@ -241,7 +241,7 @@ def main():
 
     # build optimizer
     if dist_backend == 'colossalai' and use_zero:
-        optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nvme_offload_fraction)
+        optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nof)
         optimizer = ShardedOptimizerV2(model, optimizer, initial_scale=2**5)
     elif dist_backend == 'torch_zero':
         optimizer = ZeroRedundancyOptimizer(
@@ -264,6 +264,7 @@ def main():
     # loader = get_fake_dataloader(3000000000, size, batch_size)
     train_loader, test_loader = get_cifar10_dataloader(batch_size)
     loader = train_loader
+    data_iter = iter(loader)
 
     if dist_backend=='colossalai':
         criterion = torch.nn.CrossEntropyLoss()
@@ -273,20 +274,24 @@ def main():
     else:
         engine = None
     
-    for n,  (x, y) in enumerate(loader):
+    for n in range(10000000):
+    # for n,  (x, y) in enumerate(loader):
         if n >= num_steps:
             break
         rm.reset()
-        logger.info(f"{n}: {model.arch}")
+        # logger.info(f"{n}: {model.arch}")
         
         engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
         logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
         
-        x = x.to(lrank)
-        y = y.to(lrank)
         
         batch_start = time()
         if not use_pipeline:
+            if not use_zero:
+                print(f'rank[{grank}] {n}: {model.arch}')
+            (x, y) = data_iter.__next__()
+            x = x.to(lrank)
+            y = y.to(lrank)
             ### forward
             fw_start = time()
             outputs = model(x) if engine is None else engine(x)
