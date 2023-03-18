@@ -24,4 +24,4 @@ cd hyperbox && \
 pip install -r requirements.txt && \
 python setup.py develop
 
-pip install pytest, transformers
+pip install pytest transformers
