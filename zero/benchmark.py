@@ -17,19 +17,22 @@ import torch.nn as nn
 # DDP
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
-from torch.distributed.optim import ZeroRedundancyOptimizer
 # FSDP
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp.fully_sharded_data_parallel import (
-    CPUOffload,
-    MixedPrecision,
-    BackwardPrefetch,
-)
-from torch.distributed.fsdp.wrap import (
-    size_based_auto_wrap_policy,
-    enable_wrap,
-    wrap,
-)
+try:
+    from torch.distributed.optim import ZeroRedundancyOptimizer
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp.fully_sharded_data_parallel import (
+        CPUOffload,
+        MixedPrecision,
+        BackwardPrefetch,
+    )
+    from torch.distributed.fsdp.wrap import (
+        size_based_auto_wrap_policy,
+        enable_wrap,
+        wrap,
+    )
+except ImportError:
+    print(f"FSDP is not available for torch {torch.__version__}")
 
 # Colossalai
 import colossalai
