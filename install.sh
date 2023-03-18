@@ -2,7 +2,7 @@
 cd /workspace && \
 git clone https://github.com/hpcaitech/ColossalAI.git \
 && cd ./ColossalAI \
-&& CUDA_EXT=1 pip install -v --no-cache-dir .
+&& pip install -v --no-cache-dir .
 
 # install titans
 cd /workspace && \
@@ -10,7 +10,8 @@ pip install --no-cache-dir titans
 
 # install tensornvme
 cd /workspace && \
-conda install cmake && \
+apt update && \
+apt install tmux libaio1 libaio-dev -y && \
 git clone https://github.com/hpcaitech/TensorNVMe.git && \
 cd TensorNVMe && \
 pip install -r requirements.txt && \
