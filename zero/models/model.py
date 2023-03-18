@@ -121,6 +121,7 @@ name2model = {
     'vit_10b': ViT_10B,
     'darts': get_darts,
     'toy': ToyNASModel,
+    'toy2': ToyNASModel2,
     'mobilenet': MobileNet,
     'resnet18': models.resnet18,
     'resnet152': models.resnet152,
@@ -128,26 +129,7 @@ name2model = {
 
 def get_model(name, **kwargs):
     return name2model[name](**kwargs)
-    if name == 'ofa':
-        return get_ofa(**kwargs)
-    elif name == 'vit':
-        return get_vit(**kwargs)
-    elif name == 'vit_b':
-        return ViT_B()
-    elif name == 'vit_h':
-        return ViT_H()
-    elif name == 'vit_g':
-        return ViT_G()
-    elif name == 'darts':
-        return get_darts(**kwargs)
-    elif name == 'toy':
-        return ToyNASModel()
-    elif name == 'resnet18':
-        return models.resnet18()
-    elif name == 'resnet152':
-        return models.resnet152()
 
 
 if __name__ == '__main__':
     net = get_model('ofa')
-    

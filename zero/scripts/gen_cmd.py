@@ -7,20 +7,20 @@ dist_backends = [
 ]
 models = [
     # 'vit_s',
-    # 'vit_b',
+    'vit_b',
     'vit_h',
-    # 'vit_g',
-    # 'vit_10b',
+    'vit_g',
+    'vit_10b',
     'darts',
     'ofa',
     'mobilenet',
     # 'resnet152'
 ]
 gpus = [
-    1,
+    # 1,
     # 2,
     4,
-    8
+    # 8
 ]
 batch_sizes = [
     # 8,
@@ -33,7 +33,7 @@ batch_sizes = [
     # 640,
     # 768,
     # 832,
-    # 1024,
+    1024,
     # 2048,
     # 3200,
     # 4096,
@@ -114,15 +114,15 @@ for model in models:
                                 for use_fp16 in use_fp16s:
                                     # if use_zero == 1 and use_fp16 == 1:
                                     #     continue
-                                    if use_zero == 1:
-                                        use_fp16 = 0
                                     params.update({'use_fp16': use_fp16})
                                     if use_zero == 1:
+                                        use_fp16 = 0
+                                        params.update({'use_fp16': use_fp16})
                                         for nof in nofs:
                                                 params.update({'nof': nof})
                                                 param_set.append(params.copy())
                                     else:
-                                        params.update({'nof': 0})
+                                        params.update({'nof': 0, 'use_fp16': use_fp16})
                                         param_set.append(params.copy())
                     else:
                         param_set.append(params.copy())
