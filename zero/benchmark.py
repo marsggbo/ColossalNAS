@@ -1,6 +1,7 @@
 import os
 import json
 import loguru
+import traceback
 import atexit
 import numpy as np
 import pandas as pd
@@ -388,5 +389,5 @@ def parse_tab_info(tab_info, overall_tp, logger, root_dir):
 if __name__ == '__main__':
     try:
         main()
-    except Exception as e:
-        logger.info(e)
+    except BaseException as e:
+        logger.info(traceback.format_exc())
