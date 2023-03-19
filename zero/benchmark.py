@@ -5,6 +5,7 @@ import traceback
 import atexit
 import numpy as np
 import pandas as pd
+import wandb
 from time import time
 from functools import partial
 from prettytable import PrettyTable
@@ -178,10 +179,19 @@ def main():
     logger.info(f'rank[{grank}] using backend: {dist_backend}')
 
     # save args
+    args.root_dir = root_dir
     with open(os.path.join(root_dir, 'args.json'), 'w') as f:
         if 'fp16' in args.config:
             args.config['fp16']['mode'] = str(args.config['fp16']['mode'])
         json.dump(args.__dict__, f, indent=4)
+    name = '/'.join(root_dir.split('/')[2:4])
+    wandb.init(
+        project="ColossalNAS",
+        config=args.__dict__,
+        name=name,
+        group=name+f'-{seed}',
+        entity='marsggbo'
+    )
     
     # init GPU/CPU memory
     logger.info(f"rank[{grank}] args: {args}")
@@ -194,6 +204,7 @@ def main():
             with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
                 model = get_model(args.model)
             numel = ctx.model_numel_tensor.item()
+            wandb.config.update({'model_numel': numel})
             logger.info(f'rank[{grank}] Model numel: {numel}')
             # Set tensor_placement_policy='cpu', which will offload params, grads and os
             model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)
@@ -238,6 +249,7 @@ def main():
 
     logger.info(f"rank[{grank}] Bulding model: {args.model}")
     params = sum(p.numel() for p in model.parameters())
+    wandb.config.update({'model_params': params})
     logger.info(f"rank[{grank}] Model params: {params}")
     logger.info(print_mem_info(prefix='After init model, '))
     rm = RandomMutator(model)
@@ -279,16 +291,15 @@ def main():
         engine = None
     
     for n in range(10000000):
-    # for n,  (x, y) in enumerate(loader):
         if n >= num_steps:
             break
         rm.reset()
-        # logger.info(f"{n}: {model.arch}")
+        if hasattr(model, 'arch'):
+            logger.info(f"{n}: {model.arch}")
         
         engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
         logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
-        
-        
+
         batch_start = time()
         if not use_pipeline:
             if not use_zero:
@@ -296,12 +307,14 @@ def main():
             (x, y) = data_iter.__next__()
             x = x.to(lrank)
             y = y.to(lrank)
+
             ### forward
             fw_start = time()
             outputs = model(x) if engine is None else engine(x)
             fw_end = time()
             loss = criterion(outputs, y) if engine is None else engine.criterion(outputs, y)
             fw_g, fw_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+            wandb_log = {'step':n, 'fw_gpu_mem': fw_g, 'fw_gpu_peak_mem': fw_gp}
             logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank))
 
             ### backward
@@ -317,9 +330,11 @@ def main():
                 loss.backward()
             bw_end = time()
             bw_g, bw_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+            wandb_log.update({'bw_gpu_mem': bw_g, 'bw_gpu_peak_mem': bw_gp})
             logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=lrank))
             fw_time = fw_end - fw_start
             bw_time = bw_end - bw_start
+            wandb_log.update({'fw_time': fw_time, 'bw_time': bw_time})
         else:
             fb_start = time()
             engine.execute_schedule(data_iter, return_output_label=False)
@@ -329,6 +344,7 @@ def main():
             fb_time = fb_end - fb_start
             fw_time = fb_time / 3
             bw_time = fb_time - fw_time
+            wandb_log = {'step':n, 'fb_gpu_mem': fb_g, 'fb_gpu_peak_mem': fb_gp, 'fw_time': fw_time, 'bw_time': bw_time, 'fb_time': fb_time}
         ### update
         update_start = time()
         optimizer.step() if engine is None else engine.step()
@@ -336,25 +352,28 @@ def main():
         update_time = update_end - update_start
         update_g, update_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
         logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=lrank))
+        wandb_log.update({'update_gpu_mem': update_g, 'update_gpu_peak_mem': update_gp, 'update_time': update_time})
 
         batch_end = time()
         batch_time = batch_end - batch_start
+        wandb_log.update({'batch_time': batch_time})
         
-        if n <= 5:
-            continue
-
-        # time
-        used_time += batch_time
-        num_samples += (batch_size * gpus)
-        batch_tp = gpus * batch_size / (batch_time + 1e-12) # batch throughput
-        
-        if not use_pipeline:
-            data = [grank, n, fw_g, bw_g, update_g, fw_gp, bw_gp, update_gp, batch_time, batch_tp, fw_time, bw_time, update_time]
-        else:
-            data = [grank, n, fb_g, update_g, fb_gp, update_gp, batch_time, batch_tp, fb_time, update_time]
-        data = [f'{d:.4f}' if isinstance(d, float) else d for d in data ]
-        tab_info.add_row(data)
+        if n > 5:
+            # time
+            used_time += batch_time
+            num_samples += (batch_size * gpus)
+            batch_tp = gpus * batch_size / (batch_time + 1e-12) # batch throughput
+            
+            if not use_pipeline:
+                data = [grank, n, fw_g, bw_g, update_g, fw_gp, bw_gp, update_gp, batch_time, batch_tp, fw_time, bw_time, update_time]
+            else:
+                data = [grank, n, fb_g, update_g, fb_gp, update_gp, batch_time, batch_tp, fb_time, update_time]
+            data = [f'{d:.4f}' if isinstance(d, float) else d for d in data ]
+            tab_info.add_row(data)
+            wandb_log.update({'batch_throughput': batch_tp})
+        wandb.log(wandb_log)
     overall_tp = num_samples / (used_time + 1e-12)
+    wandb.log({'overall_throughput': overall_tp})
     logger.info(f'rank[{grank}], overall throughput: {overall_tp:.4f} samples/s')
     parse_tab_info(tab_info, overall_tp, logger, root_dir)
 

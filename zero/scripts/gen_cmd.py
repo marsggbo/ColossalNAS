@@ -20,7 +20,7 @@ gpus = [
     # 1,
     # 2,
     4,
-    # 8
+    8
 ]
 batch_sizes = [
     # 8,
@@ -64,6 +64,8 @@ nofs = [
 debug = 0
 steps = 50
 exp_name = '_'
+# seed = random.randint(0, 1000000)
+seed = 888
 
 # torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 benchmark.py \
 command = '''
@@ -79,7 +81,8 @@ torchrun --nproc_per_node={gpus} benchmark.py \
 --batch_size {batch_size} \
 --img_size {img_size} \
 --exp_name {exp_name} \
---debug {debug} 
+--debug {debug} \
+--seed {seed}
 '''
 
 param_set = []
@@ -102,6 +105,7 @@ for model in models:
                         'use_pipeline': 0,
                         'use_fp16': 1,
                         'debug': debug,
+                        'seed': seed
                     }
                     if dist_backend == 'colossalai':
                         for use_zero in use_zeros:
