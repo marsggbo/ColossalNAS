@@ -6,6 +6,12 @@ from torch.utils.data import DataLoader
 transform = transforms.Compose([transforms.ToTensor(),
                                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
+def get_cifar10_dataset(path='/datasets/cifar10'):
+    # Create a CIFAR-10 train dataset and dataloader with 4 workers
+    trainset = datasets.CIFAR10(root=path, train=True, download=True, transform=transform)
+    testset = datasets.CIFAR10(root=path, train=False, download=True, transform=transform)
+    return trainset, testset
+
 def get_cifar10_dataloader(batch_size, path='/datasets/cifar10'):
     # Create a CIFAR-10 train dataset and dataloader with 4 workers
     trainset = datasets.CIFAR10(root=path, train=True, download=True, transform=transform)

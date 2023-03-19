@@ -10,7 +10,7 @@ models = [
     'vit_b',
     'vit_h',
     'vit_g',
-    'vit_10b',
+    # 'vit_10b',
     'darts',
     'ofa',
     'mobilenet',
@@ -109,8 +109,12 @@ for model in models:
                     }
                     if dist_backend == 'colossalai':
                         for use_zero in use_zeros:
+                            if model in ['vit_10b'] and not use_zero:
+                                continue
                             params.update({'use_zero': use_zero})
                             for use_pipeline in use_pipelines:
+                                if model in ['darts']:
+                                    continue
                                 if gpu <= 1 and use_pipeline == 1: # GPU数量>1时，pipeline才能使用
                                     continue
                                 if use_zero == 1 and use_pipeline == 1:

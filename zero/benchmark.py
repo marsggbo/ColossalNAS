@@ -37,6 +37,7 @@ except ImportError:
 
 # Colossalai
 import colossalai
+from colossalai.utils import get_dataloader
 from colossalai.logging import disable_existing_loggers, get_dist_logger
 ## Colossalai Zero
 from colossalai.nn.optimizer import HybridAdam
@@ -54,7 +55,7 @@ from colossalai.amp import AMP_TYPE
 
 from hyperbox.mutator import RandomMutator
 
-from dataloader import get_fake_dataloader, get_cifar10_dataloader
+from dataloader import get_fake_dataloader, get_cifar10_dataloader, get_cifar10_dataset, FakeDataset
 from models import get_model
 from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo
 
@@ -278,8 +279,12 @@ def main():
     size = int(args.img_size)
     
     # loader = get_fake_dataloader(3000000000, size, batch_size)
-    train_loader, test_loader = get_cifar10_dataloader(batch_size)
-    loader = train_loader
+    # train_loader, test_loader = get_cifar10_dataloader(batch_size)
+    # loader = train_loader
+    train_dataset, test_dataset = get_cifar10_dataset(size)
+    dataset = torch.utils.data.ConcatDataset([train_dataset, train_dataset, train_dataset])
+    loader = get_dataloader(dataset, add_sampler=True, batch_size=args.batch_size, num_workers=4,
+            pin_memory=True, shuffle=False)
     data_iter = iter(loader)
 
     if dist_backend=='colossalai':

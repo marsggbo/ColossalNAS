@@ -2,20 +2,20 @@
 cd /workspace && \
 git clone https://github.com/hpcaitech/ColossalAI.git \
 && cd ./ColossalAI \
-&& pip install -v --no-cache-dir .
+&& NO_CUDA_EXT=1 pip install -v --no-cache-dir .
 
-# install titans
-cd /workspace && \
-pip install --no-cache-dir titans
+# # install titans
+# cd /workspace && \
+# pip install --no-cache-dir titans
 
 # install tensornvme
 cd /workspace && \
 apt update && \
-apt install tmux libaio1 libaio-dev -y && \
+apt install tmux libaio1 libaio-dev && \
 git clone https://github.com/hpcaitech/TensorNVMe.git && \
 cd TensorNVMe && \
 pip install -r requirements.txt && \
-pip install -v --no-cache-dir .
+DISABLE_URING=1 pip install -v --no-cache-dir .
 
 # install hyperbox
 cd /workspace && \
@@ -25,3 +25,4 @@ pip install -r requirements.txt && \
 python setup.py develop
 
 pip install pytest transformers
+pip install -U numpy
