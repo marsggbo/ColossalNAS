@@ -1,0 +1,1 @@
+torchrun --nproc_per_node=1 benchmark.py --dist_backend=colossalai --gpus 1 --model toy2 --use_zero 1 --use_pipeline 0 --use_fp16 0 --nof 0 --steps 20 --batch_size 2 --img_size 32 --exp_name _ --debug 0  --seed 888
