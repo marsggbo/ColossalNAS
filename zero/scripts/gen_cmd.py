@@ -65,8 +65,9 @@ debug = 0
 steps = 50
 exp_name = '_'
 
+# torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 benchmark.py \
 command = '''
-torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 benchmark.py \
+torchrun --nproc_per_node={gpus} benchmark.py \
 --dist_backend={dist_backend} \
 --gpus {gpus} \
 --model {model} \
@@ -88,7 +89,7 @@ for model in models:
             for batch_size in batch_sizes:
                 for img_size in img_sizes:
                     if model == 'vit_10b' and batch_size > 32:
-                        continue
+                        batch_size = batch_size // 256
                     params = {
                         'model': model,
                         'dist_backend': dist_backend,
