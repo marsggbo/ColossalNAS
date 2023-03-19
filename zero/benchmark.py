@@ -281,7 +281,7 @@ def main():
     # loader = get_fake_dataloader(3000000000, size, batch_size)
     # train_loader, test_loader = get_cifar10_dataloader(batch_size)
     # loader = train_loader
-    train_dataset, test_dataset = get_cifar10_dataset(size)
+    train_dataset, test_dataset = get_cifar10_dataset()
     dataset = torch.utils.data.ConcatDataset([train_dataset, train_dataset, train_dataset])
     loader = get_dataloader(dataset, add_sampler=True, batch_size=args.batch_size, num_workers=4,
             pin_memory=True, shuffle=False)
