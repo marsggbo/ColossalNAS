@@ -40,6 +40,8 @@ import colossalai
 from colossalai.utils import get_dataloader
 from colossalai.logging import disable_existing_loggers, get_dist_logger
 ## Colossalai Zero
+from colossalai.nn.parallel import zero_model_wrapper, zero_optim_wrapper
+from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.zero.init_ctx import ZeroInitContext
 from colossalai.core import global_context as gpc
@@ -201,14 +203,23 @@ def main():
     # build model
     if dist_backend == 'colossalai':
         if use_zero:
-            shard_strategy = TensorShardStrategy() if args.shardstrategy == 'tss' else BucketTensorShardStrategy()
-            with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
+            # shard_strategy = TensorShardStrategy() if args.shardstrategy == 'tss' else BucketTensorShardStrategy()
+            # with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
+            #     model = get_model(args.model)
+            # numel = ctx.model_numel_tensor.item()
+            # wandb.config.update({'model_numel': numel})
+            # logger.info(f'rank[{grank}] Model numel: {numel}')
+            # # Set tensor_placement_policy='cpu', which will offload params, grads and os
+            # model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)
+            
+            with ColoInitContext(device=torch.cuda.current_device()):
                 model = get_model(args.model)
-            numel = ctx.model_numel_tensor.item()
-            wandb.config.update({'model_numel': numel})
-            logger.info(f'rank[{grank}] Model numel: {numel}')
-            # Set tensor_placement_policy='cpu', which will offload params, grads and os
-            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)
+            optimizer = HybridAdam(model.parameters(), nvme_offload_fraction=nvme_offload_fraction)
+            print(f'Model numel: {get_model_numel(model) / 1024**3:.3f} B')
+            gemini_config = dict(strict_ddp_mode=True, device=torch.cuda.current_device(),
+                                placement_policy='cpu', pin_memory=True, hidden_dim=config.n_embd)
+            model = zero_model_wrapper(model, zero_stage=3, gemini_config=gemini_config)
+            optimizer = zero_optim_wrapper(model, optimizer, initial_scale=2**5)
         elif use_pipeline:
             # Todo: add pipeline
             pipelinable = PipelinableContext()
@@ -294,7 +305,7 @@ def main():
         )
     else:
         engine = None
-    
+
     for n in range(10000000):
         if n >= num_steps:
             break

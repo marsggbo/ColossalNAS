@@ -128,6 +128,10 @@ name2model = {
 }
 
 def get_model(name, **kwargs):
+    if name == 'mobilenet':
+        kwargs['classes'] = 10
+    elif name == 'ofa' or name.startswith('vit'):
+        kwargs['num_classes'] = 10
     return name2model[name](**kwargs)
 
 
