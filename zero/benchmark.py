@@ -59,14 +59,14 @@ from hyperbox.mutator import RandomMutator
 
 from dataloader import get_fake_dataloader, get_cifar10_dataloader, get_cifar10_dataset, FakeDataset
 from models import get_model
-from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo
+from utils import get_peak_gpu_mem, get_gpu_mem, get_cpu_mem, print_mem_info, DeviceInfo, get_mem_info
 
 
 logger = loguru.logger
 @atexit.register
 def exit_handler():
     global logger
-    logger.info("exit with no error")
+    logger.info("exit with no error", ranks=[0])
     
 def get_args():
     parser = colossalai.get_default_parser()
@@ -98,6 +98,10 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def infinite_fake_data_generator(batch_size, img_size, num_classes=10):
+    while True:
+        yield (torch.rand(batch_size, 3, img_size, img_size), torch.randint(low=0, high=num_classes, size=(batch_size,)))
 
 def main():
     global logger
@@ -179,7 +183,7 @@ def main():
         root_dir = f'{root_dir}/rank_{grank}'
         logger = loguru.logger
         logger.add(f'{root_dir}/rank_{grank}.log', format="{time} {level} {message}", level="INFO", enqueue=True, colorize=True)
-    logger.info(f'rank[{grank}] using backend: {dist_backend}')
+    logger.info(f'rank[{grank}] using backend: {dist_backend}', ranks=[0])
 
     # save args
     args.root_dir = root_dir
@@ -197,29 +201,20 @@ def main():
     )
     
     # init GPU/CPU memory
-    logger.info(f"rank[{grank}] args: {args}")
-    logger.info(print_mem_info(rank=lrank))
+    logger.info(f"rank[{grank}] args: {args}", ranks=[0])
+    logger.info(print_mem_info(rank=lrank), ranks=[0])
 
     # build model
     if dist_backend == 'colossalai':
         if use_zero:
-            # shard_strategy = TensorShardStrategy() if args.shardstrategy == 'tss' else BucketTensorShardStrategy()
-            # with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
-            #     model = get_model(args.model)
-            # numel = ctx.model_numel_tensor.item()
-            # wandb.config.update({'model_numel': numel})
-            # logger.info(f'rank[{grank}] Model numel: {numel}')
-            # # Set tensor_placement_policy='cpu', which will offload params, grads and os
-            # model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)
-            
-            with ColoInitContext(device=torch.cuda.current_device()):
+            shard_strategy = TensorShardStrategy() if args.shardstrategy == 'tss' else BucketTensorShardStrategy()
+            with ZeroInitContext(target_device=torch.device(lrank), shard_strategy=shard_strategy, shard_param=True) as ctx:
                 model = get_model(args.model)
-            optimizer = HybridAdam(model.parameters(), nvme_offload_fraction=nvme_offload_fraction)
-            print(f'Model numel: {get_model_numel(model) / 1024**3:.3f} B')
-            gemini_config = dict(strict_ddp_mode=True, device=torch.cuda.current_device(),
-                                placement_policy='cpu', pin_memory=True, hidden_dim=config.n_embd)
-            model = zero_model_wrapper(model, zero_stage=3, gemini_config=gemini_config)
-            optimizer = zero_optim_wrapper(model, optimizer, initial_scale=2**5)
+            numel = ctx.model_numel_tensor.item()
+            wandb.config.update({'model_numel': numel})
+            logger.info(f'rank[{grank}] Model numel: {numel}', ranks=[0])
+            # Set tensor_placement_policy='cpu', which will offload params, grads and os
+            model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)       
         elif use_pipeline:
             # Todo: add pipeline
             pipelinable = PipelinableContext()
@@ -227,7 +222,12 @@ def main():
                 model = get_model(args.model)
             # exec_seq = ['conv1', 'conv2', 'gavg', 
             #             (lambda x: torch.flatten(x, 1), "behind"), 'fc']
-            # pipelinable.to_layer_list(model.exec_seq)
+            # resnet
+            # exec_seq = [
+            #     'conv1', 'bn1', 'relu', 'maxpool', 'layer1', 'layer2', 'layer3', 'layer4', 'avgpool',
+            #     (lambda x: torch.flatten(x, 1), "behind"), 'fc'
+            # ]
+            # # pipelinable.to_layer_list(model.exec_seq)
             # pipelinable.to_layer_list(exec_seq)
             pipelinable.to_layer_list()
             pipelinable.policy = "uniform"
@@ -259,11 +259,11 @@ def main():
         )
         # model = DDP(model, find_unused_parameters=True, device_ids=[grank], output_device=grank)
 
-    logger.info(f"rank[{grank}] Bulding model: {args.model}")
+    logger.info(f"rank[{grank}] Bulding model: {args.model}", ranks=[0])
     params = sum(p.numel() for p in model.parameters())
     wandb.config.update({'model_params': params})
-    logger.info(f"rank[{grank}] Model params: {params}")
-    logger.info(print_mem_info(prefix='After init model, '))
+    logger.info(f"rank[{grank}] Model params: {params}", ranks=[0])
+    logger.info(print_mem_info(prefix='After init model, '), ranks=[0])
     rm = RandomMutator(model)
     # rm.reset()
 
@@ -276,15 +276,15 @@ def main():
             model.parameters(), optimizer_class=torch.optim.Adam, lr=0.001)
     else:
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    logger.info(print_mem_info(prefix='After init optim, '))
+    logger.info(print_mem_info(prefix='After init optim, '), ranks=[0])
 
     model.train()
     num_samples = 0.
     used_time = 0.
     if not use_pipeline:
-        headers = 'rank, batchIdx, fw_g, bw_g, update_g, fw_p, bw_p, update_gp, batch_time, batch_tp, fw_time, bw_time, update_time'
+        headers = 'Idx, Forward CPU (MB), Backward CPU (MB), Update CPU (MB), PeakCPU (MB), Forward GPU (MB), Backward GPU (MB), Update GPU (MB), PeakGPU (MB), Batch Time, Batch Throughput, Forward Time, Backward Time, Update Time'
     else:
-        headers = 'rank, batchIdx, fb_g, update_g, fb_p, update_gp, batch_time, batch_tp, fb_time, update_time'
+        headers = 'Idx, For&Back-ward CPU (MB), Update-CPU (MB), PeakCPU (MB), For&Back-ward GPU (MB), Update-GPU (MB), PeakGPU (MB), Batch Time, Batch Throughput, For&Back-ward Time, Update Time'
     headers = headers.split(', ')
     tab_info = PrettyTable(headers)
     size = int(args.img_size)
@@ -292,14 +292,15 @@ def main():
     # loader = get_fake_dataloader(3000000000, size, batch_size)
     # train_loader, test_loader = get_cifar10_dataloader(batch_size)
     # loader = train_loader
-    train_dataset, test_dataset = get_cifar10_dataset()
-    dataset = torch.utils.data.ConcatDataset([train_dataset, train_dataset, train_dataset])
-    loader = get_dataloader(dataset, add_sampler=True, batch_size=args.batch_size, num_workers=4,
-            pin_memory=True, shuffle=False)
-    data_iter = iter(loader)
+    # train_dataset, test_dataset = get_cifar10_dataset()
+    # dataset = torch.utils.data.ConcatDataset([train_dataset]*100)
+    # loader = get_dataloader(dataset, add_sampler=True, batch_size=args.batch_size, num_workers=4,
+    #         pin_memory=True, shuffle=False)
+    # data_iter = iter(loader)
+    data_iter = infinite_fake_data_generator(args.batch_size, size, 10)
 
+    criterion = torch.nn.CrossEntropyLoss()
     if dist_backend=='colossalai':
-        criterion = torch.nn.CrossEntropyLoss()
         engine, _, _, _ = colossalai.initialize(
             model, optimizer, criterion, None,
         )
@@ -311,11 +312,13 @@ def main():
             break
         rm.reset()
         if hasattr(model, 'arch'):
-            logger.info(f"{n}: {model.arch}")
+            logger.info(f"{n}: {model.arch}", ranks=[0])
         
         engine.zero_grad() if engine is not None else optimizer.zero_grad(set_to_none=True)
-        logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank))
+        logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pre-Forward ', rank=lrank), ranks=[0])
 
+        gpu_mem_hist = []
+        cpu_mem_hist = []
         batch_start = time()
         if not use_pipeline:
             if not use_zero:
@@ -329,9 +332,9 @@ def main():
             outputs = model(x) if engine is None else engine(x)
             fw_end = time()
             loss = criterion(outputs, y) if engine is None else engine.criterion(outputs, y)
-            fw_g, fw_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
-            wandb_log = {'step':n, 'fw_gpu_mem': fw_g, 'fw_gpu_peak_mem': fw_gp}
-            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank))
+            fw_c, fw_g, fw_gp = get_mem_info(lrank)
+            wandb_log = {'step':n, 'fw_cpu_mem': fw_c, 'fw_gpu_mem': fw_g, 'fw_gpu_peak_mem': fw_gp}
+            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Forward ', rank=lrank), ranks=[0])
 
             ### backward
             bw_start = time()
@@ -345,34 +348,43 @@ def main():
             else:
                 loss.backward()
             bw_end = time()
-            bw_g, bw_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
-            wandb_log.update({'bw_gpu_mem': bw_g, 'bw_gpu_peak_mem': bw_gp})
-            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=lrank))
+            bw_c, bw_g, bw_gp = get_mem_info(lrank)
+            wandb_log.update({'bw_cpu_mem': bw_c, 'bw_gpu_mem': bw_g, 'bw_gpu_peak_mem': bw_gp})
+            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Backward ', rank=lrank), ranks=[0])
             fw_time = fw_end - fw_start
             bw_time = bw_end - bw_start
             wandb_log.update({'fw_time': fw_time, 'bw_time': bw_time})
+            gpu_mem_hist = [fw_gp, bw_gp]
+            cpu_mem_hist = [fw_c, bw_c]
         else:
             fb_start = time()
             engine.execute_schedule(data_iter, return_output_label=False)
-            fb_g, fb_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
+            fb_c, fb_g, fb_gp = get_mem_info(lrank)
             fb_end = time()
-            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pipe-Forward-Backward ', rank=lrank))
+            gpu_mem_hist = [fb_gp]
+            cpu_mem_hist = [fb_c]
+            logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Pipe-Forward-Backward ', rank=lrank), ranks=[0])
             fb_time = fb_end - fb_start
             fw_time = fb_time / 3
             bw_time = fb_time - fw_time
-            wandb_log = {'step':n, 'fb_gpu_mem': fb_g, 'fb_gpu_peak_mem': fb_gp, 'fw_time': fw_time, 'bw_time': bw_time, 'fb_time': fb_time}
+            wandb_log = {'step':n, 'fb_c_mem': fb_c, 'fb_gpu_mem': fb_g, 'fb_gpu_peak_mem': fb_gp,
+                         'fw_time': fw_time, 'bw_time': bw_time, 'fb_time': fb_time}
         ### update
         update_start = time()
         optimizer.step() if engine is None else engine.step()
         update_end = time()
         update_time = update_end - update_start
-        update_g, update_gp = get_gpu_mem(lrank), get_peak_gpu_mem(lrank)
-        logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=lrank))
-        wandb_log.update({'update_gpu_mem': update_g, 'update_gpu_peak_mem': update_gp, 'update_time': update_time})
+        update_c, update_g, update_gp = get_mem_info(lrank)
+        gpu_mem_hist.append(update_gp)
+        cpu_mem_hist.append(update_c)
+        logger.info(print_mem_info(prefix=f'[{n+1}/{num_steps}] Post-Step ', rank=lrank), ranks=[0])
+        wandb_log.update({'update_cpu_mem': update_c, 'update_gpu_mem': update_g, 'update_gpu_peak_mem': update_gp, 'update_time': update_time})
 
         batch_end = time()
         batch_time = batch_end - batch_start
         wandb_log.update({'batch_time': batch_time})
+        cp = max(cpu_mem_hist)
+        gp = max(gpu_mem_hist)
         
         if n > 5:
             # time
@@ -381,16 +393,16 @@ def main():
             batch_tp = gpus * batch_size / (batch_time + 1e-12) # batch throughput
             
             if not use_pipeline:
-                data = [grank, n, fw_g, bw_g, update_g, fw_gp, bw_gp, update_gp, batch_time, batch_tp, fw_time, bw_time, update_time]
+                data = [n, fw_c, bw_c, update_c, cp, fw_g, bw_g, update_g, gp, batch_time, batch_tp, fw_time, bw_time, update_time]
             else:
-                data = [grank, n, fb_g, update_g, fb_gp, update_gp, batch_time, batch_tp, fb_time, update_time]
+                data = [n, fb_c, update_c, cp, fb_g, update_g, gp, batch_time, batch_tp, fb_time, update_time]
             data = [f'{d:.4f}' if isinstance(d, float) else d for d in data ]
             tab_info.add_row(data)
             wandb_log.update({'batch_throughput': batch_tp})
         wandb.log(wandb_log)
     overall_tp = num_samples / (used_time + 1e-12)
     wandb.log({'overall_throughput': overall_tp})
-    logger.info(f'rank[{grank}], overall throughput: {overall_tp:.4f} samples/s')
+    logger.info(f'rank[{grank}], overall throughput: {overall_tp:.4f} samples/s', ranks=[0])
     parse_tab_info(tab_info, overall_tp, logger, root_dir)
 
 
@@ -399,13 +411,16 @@ def parse_tab_info(tab_info, overall_tp, logger, root_dir):
     columns = csv_info.split('\r\n')[0].split(',')
     values =[x.split(',') for x in csv_info.split('\r\n')[1:-1]]
     pd_csv = pd.DataFrame(values, columns=columns).astype(float)
-    mean_csv = pd_csv.groupby('rank').mean().values[0].tolist()
-    std_csv = pd_csv.groupby('rank').std().values[0].tolist()
+    max_csv = pd_csv.max().tolist()[1:]
+    mean_csv = pd_csv.mean().tolist()[1:]
+    std_csv = pd_csv.std().tolist()[1:]
+    max_csv =  ['max'] + [f'{d:.4f}' if isinstance(d, float) else d for d in max_csv]
     mean_csv = ['mean'] + [f'{d:.4f}' if isinstance(d, float) else d for d in mean_csv]
     std_csv = ['std'] + [f'{d:.4f}' if isinstance(d, float) else d for d in std_csv]
+    tab_info.add_row(max_csv)
     tab_info.add_row(mean_csv)
     tab_info.add_row(std_csv)
-    logger.info(tab_info)
+    logger.info(tab_info, ranks=[0])
     csv_info = tab_info.get_csv_string()
     with open(f'{root_dir}/statistic.csv', 'w', newline='') as f:
         f.write(csv_info)
@@ -416,7 +431,7 @@ def parse_tab_info(tab_info, overall_tp, logger, root_dir):
             line = line.split(',')
             line.pop(1)
             line = ','.join(line)
-            if idx in [0, len(lines) - 2, len(lines) - 1]:
+            if idx in [0, len(lines) - 3, len(lines) - 2, len(lines) - 1]:
                 overall_info.append(line)
         line = ','.join(['TP', f"{overall_tp:.4f}"] + [''] * (len(overall_info[0].split(',')) - 2))
         overall_info.append(line)
@@ -428,4 +443,4 @@ if __name__ == '__main__':
     try:
         main()
     except BaseException as e:
-        logger.info(traceback.format_exc())
+        logger.info(traceback.format_exc(), ranks=[0])

@@ -20,7 +20,7 @@ gpus = [
     # 1,
     # 2,
     4,
-    8
+    # 8
 ]
 batch_sizes = [
     # 8,
@@ -53,16 +53,16 @@ use_pipelines = [
     1,
 ]
 use_fp16s = [
-    # 0,
+    0,
     1,
 ]
 nofs = [
     0,
-    0.5,
-    1
+    # 0.5,
+    # 1
 ]
 debug = 0
-steps = 50
+steps = 100
 exp_name = '_'
 # seed = random.randint(0, 1000000)
 seed = 888
@@ -93,6 +93,8 @@ for model in models:
                 for img_size in img_sizes:
                     if model == 'vit_10b' and batch_size > 32:
                         batch_size = batch_size // 256
+                    if model == 'vit_g' and batch_size > 32:
+                        batch_size = batch_size // 4
                     params = {
                         'model': model,
                         'dist_backend': dist_backend,
@@ -113,7 +115,7 @@ for model in models:
                                 continue
                             params.update({'use_zero': use_zero})
                             for use_pipeline in use_pipelines:
-                                if model in ['darts']:
+                                if model in ['darts', 'ofa', 'mobilenet'] and use_pipeline == 1:
                                     continue
                                 if gpu <= 1 and use_pipeline == 1: # GPU数量>1时，pipeline才能使用
                                     continue
@@ -138,7 +140,9 @@ for model in models:
 
 commands = []
 for param in param_set:
-    commands.append(command.format(**param))
+    gen_command = command.format(**param)
+    if gen_command not in commands:
+        commands.append(gen_command)
 for i, command in enumerate(commands):
     print(i, command)
     # os.system(command)
