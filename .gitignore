@@ -130,3 +130,4 @@ dmypy.json
 logs/
 wandb
 results
+local_nvme
