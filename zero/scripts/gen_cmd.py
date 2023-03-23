@@ -12,14 +12,14 @@ models = [
     'vit_g',
     # 'vit_10b',
     'darts',
-    'ofa',
+    # 'ofa',
     'mobilenet',
     # 'resnet152'
 ]
 gpus = [
     # 1,
-    # 2,
-    4,
+    2,
+    # 4,
     # 8
 ]
 batch_sizes = [
@@ -27,8 +27,8 @@ batch_sizes = [
     # 16,
     # 32,
     # 64,
-    # 128,
-    # 256,
+    128,
+    256,
     512,
     # 640,
     # 768,
@@ -58,8 +58,9 @@ use_fp16s = [
 ]
 nofs = [
     0,
+    # 0.2,
     # 0.5,
-    # 1
+    1
 ]
 debug = 0
 steps = 100
