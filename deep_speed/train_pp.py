@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 
-import os
 import argparse
-
-import torch
-import torch.distributed as dist
-
-import torchvision
-import torchvision.transforms as transforms
-from torchvision.models import AlexNet
-from torchvision.models import vgg19
+import os
+from time import time
 
 import deepspeed
+import torch
+import torch.distributed as dist
+import torchvision
+import torchvision.transforms as transforms
 from deepspeed.pipe import PipelineModule
 from deepspeed.utils import RepeatingLoader
-
-from hyperbox.networks.vit import ViT_S, ViT_B, ViT_H, ViT_G, ViT_10B
 from hyperbox.mutator import RandomMutator
+from hyperbox.networks.mobilenet import MobileNet
+from hyperbox.networks.vit import ViT_10B, ViT_B, ViT_G, ViT_H, ViT_S
+from model_zoo import get_model
+from torchvision.models import AlexNet, vgg19
 
 
 def cifar_trainset(local_rank, dl_path='/home/xihe/datasets/cifar10'):
@@ -62,6 +61,10 @@ def get_args():
                         type=str,
                         default='nccl',
                         help='distributed backend')
+    parser.add_argument('--model',
+                        type=str,
+                        default='vit_b',
+                        help='model name')
     parser.add_argument('--seed', type=int, default=1138, help='PRNG seed')
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
@@ -116,32 +119,14 @@ def join_layers(vision_model):
     ]
     return layers
 
-def join_vit_layers(vision_model):
-    layers = []
-    for name, m in vision_model.named_children():
-        if name == 'vit_blocks':
-            for name, m in m.named_children():
-                layers.append(m)
-        else:
-            layers.append(m)
-    return layers
-
 def train_pipe(args, part='parameters'):
     torch.manual_seed(args.seed)
     deepspeed.runtime.utils.set_random_seed(args.seed)
 
-    #
-    # Build the model
-    #
-
-    # VGG also works :-)
-    #net = vgg19(num_classes=10)
-    # net = AlexNet(num_classes=10)    
-    net = ViT_S(num_classes=10)
+    net = get_model(args.model)
     rm = RandomMutator(net)
-    # layers = torch.nn.Sequential(*[m for m in net.children()])
 
-    net = PipelineModule(layers=join_vit_layers(net),
+    net = PipelineModule(layers=net.join_layers(),
                          loss_fn=torch.nn.CrossEntropyLoss(),
                          num_stages=args.pipeline_parallel_size,
                          partition_method=part,
@@ -155,9 +140,20 @@ def train_pipe(args, part='parameters'):
         model_parameters=[p for p in net.parameters() if p.requires_grad],
         training_data=trainset)
 
+    rank = args.local_rank
+    world_size = torch.distributed.get_world_size()
+    print(f"rank {rank} is ready to go")
+    BS = 1024
     for step in range(args.steps):
         rm.reset()
+        start = time()
         loss = engine.train_batch()
+        end = time()
+        throughput = BS / (end - start)
+        calc = f"{BS} (BS) * {world_size}($gpus) / {end - start:.2f}(time)"
+        torch.cuda.synchronize()
+        if rank == 0:
+            print(f'[rank{rank}] OMG~~~ throughput is {calc}={throughput:.2f} img/sec loss: {loss}')
 
 
 if __name__ == '__main__':

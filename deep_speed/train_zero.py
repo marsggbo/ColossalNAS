@@ -1,14 +1,20 @@
+import argparse
+from time import time
+
+import deepspeed
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-import argparse
-import deepspeed
-
-from hyperbox.networks.vit import ViT_S, ViT_B, ViT_H, ViT_G, ViT_10B
 from hyperbox.mutator import RandomMutator
+from hyperbox.networks.darts import DartsNetwork
+from hyperbox.networks.vit import ViT_10B, ViT_B, ViT_G, ViT_H, ViT_S
+from model_zoo import get_model
+
 
 def add_argument():
-
     parser = argparse.ArgumentParser(description='CIFAR')
 
     #data
@@ -90,71 +96,56 @@ def add_argument():
         help=
         '(moe) create separate moe param groups, required when using ZeRO w. MoE'
     )
-
+    parser.add_argument('--model',
+                        type=str,
+                        default='vit_b',
+                        help='model name')
+    parser.add_argument('--steps',
+                        type=int,
+                        default=50,
+                        help='steps')
     # Include DeepSpeed configuration arguments
     parser = deepspeed.add_config_arguments(parser)
-
     args = parser.parse_args()
-
     return args
 
+def get_datasets(DATA_PATH='/home/xihe/datasets/cifar10'):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
 
-args = add_argument()
-deepspeed.init_distributed()
+    if torch.distributed.get_rank() != 0:
+        # might be downloading cifar data, let rank 0 download first
+        torch.distributed.barrier()
 
-########################################################################
-# The output of torchvision datasets are PILImage images of range [0, 1].
-# We transform them to Tensors of normalized range [-1, 1].
-# .. note::
-#     If running on Windows and you get a BrokenPipeError, try setting
-#     the num_worker of torch.utils.data.DataLoader() to 0.
+    trainset = torchvision.datasets.CIFAR10(root=DATA_PATH,
+                                            train=True,
+                                            download=True,
+                                            transform=transform)
 
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
-
-if torch.distributed.get_rank() != 0:
-    # might be downloading cifar data, let rank 0 download first
-    torch.distributed.barrier()
-
-DATA_PATH = '/home/xihe/datasets/cifar10'
-trainset = torchvision.datasets.CIFAR10(root=DATA_PATH,
-                                        train=True,
+    testset = torchvision.datasets.CIFAR10(root=DATA_PATH,
+                                        train=False,
                                         download=True,
                                         transform=transform)
 
-if torch.distributed.get_rank() == 0:
-    # cifar data is downloaded, indicate other ranks can proceed
-    torch.distributed.barrier()
+    if torch.distributed.get_rank() == 0:
+        # cifar data is downloaded, indicate other ranks can proceed
+        torch.distributed.barrier()
 
-trainloader = torch.utils.data.DataLoader(trainset,
-                                          batch_size=args.batch_size,
-                                          shuffle=True,
-                                          num_workers=2)
+    trainloader = torch.utils.data.DataLoader(trainset,
+                                              batch_size=args.batch_size,
+                                              shuffle=True,
+                                              num_workers=2)
 
-testset = torchvision.datasets.CIFAR10(root=DATA_PATH,
-                                       train=False,
-                                       download=True,
-                                       transform=transform)
-testloader = torch.utils.data.DataLoader(testset,
-                                         batch_size=args.batch_size,
-                                         shuffle=False,
-                                         num_workers=2)
+    testloader = torch.utils.data.DataLoader(testset,
+                                             batch_size=args.batch_size,
+                                             shuffle=False,
+                                             num_workers=2)
 
-classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse',
-           'ship', 'truck')
-
-########################################################################
-# 2. Define a Convolutional Neural Network
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# Copy the neural network from the Neural Networks section before and modify it to
-# take 3-channel images (instead of 1-channel images as it was defined).
-
-import torch.nn as nn
-import torch.nn.functional as F
-
-
+    classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse',
+            'ship', 'truck')
+    return trainset, testset, trainloader, testloader, classes
 
 class Net(nn.Module):
     def __init__(self):
@@ -198,14 +189,20 @@ class Net(nn.Module):
             x = self.fc3(x)
         return x
 
+ 
+args = add_argument()
+deepspeed.init_distributed()
+trainset, testset, trainloader, testloader, classes = get_datasets()
 
-   
 # net = ViT_10B(num_classes=10)
-net = ViT_S(num_classes=10)
+# net = ViT_S(num_classes=10)
+# net = DartsNetwork(n_layers=2, n_nodes=4)
+net = get_model(args.model)
 rm = RandomMutator(net)
 
 def create_moe_param_groups(model):
-    from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
+    from deepspeed.moe.utils import \
+        split_params_into_different_moe_groups_for_optimizer
 
     parameters = {
         'params': [p for p in model.parameters()],
@@ -213,7 +210,6 @@ def create_moe_param_groups(model):
     }
 
     return split_params_into_different_moe_groups_for_optimizer(parameters)
-
 
 parameters = filter(lambda p: p.requires_grad, net.parameters())
 if args.moe_param_group:
@@ -229,50 +225,49 @@ model_engine, optimizer, trainloader, __ = deepspeed.initialize(
 fp16 = model_engine.fp16_enabled()
 print(f'fp16={fp16}')
 
-#device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-#net.to(device)
-########################################################################
-# 3. Define a Loss function and optimizer
-# ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# Let's use a Classification Cross-Entropy loss and SGD with momentum.
-
-import torch.optim as optim
-
 criterion = nn.CrossEntropyLoss()
-#optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
-
-########################################################################
-# 4. Train the network
-# ^^^^^^^^^^^^^^^^^^^^
-#
-# This is when things start to get interesting.
-# We simply have to loop over our data iterator, and feed the inputs to the
-# network and optimize.
-
-for epoch in range(2):  # loop over the dataset multiple times
+rank = model_engine.local_rank
+world_size = torch.distributed.get_world_size()
+for epoch in range(1):  # loop over the dataset multiple times
 
     running_loss = 0.0
+    epoch_start = time()
+    BS = 0
     for i, data in enumerate(trainloader):
+        if i+1 > args.steps:
+            break
         rm.reset()
         # get the inputs; data is a list of [inputs, labels]
         inputs, labels = data[0].to(model_engine.local_rank), data[1].to(
             model_engine.local_rank)
         if fp16:
             inputs = inputs.half()
+        start = time()
         outputs = model_engine(inputs)
         loss = criterion(outputs, labels)
 
         model_engine.backward(loss)
         model_engine.step()
+        end = time()
+        BS = inputs.shape[0]
+        throughput = BS * world_size / (end - start)
+        calc = f"{BS} (BS) * {world_size}($gpus) / {end - start:.2f}(time)"
+        torch.cuda.synchronize()
+        if rank == 0:
+            print(f'[rank{rank}] OMG~~~ throughput is {calc}={throughput:.2f} img/sec loss: {loss}')
 
         # print statistics
         running_loss += loss.item()
-        if i % args.log_interval == (
-                args.log_interval -
-                1):  # print every log_interval mini-batches
-            print('[%d, %5d] loss: %.3f' %
-                  (epoch + 1, i + 1, running_loss / args.log_interval))
-            running_loss = 0.0
+        # if i % args.log_interval == (
+        #         args.log_interval -
+        #         1):  # print every log_interval mini-batches
+        #     print('[%d, %5d] loss: %.3f' %
+        #           (epoch + 1, i + 1, running_loss / args.log_interval))
+        #     running_loss = 0.0
+    epoch_end = time()
+    throughput = BS * args.steps * world_size / (epoch_end - epoch_start)
+    calc = f"{BS} (BS) * {args.steps} (steps) * {world_size}($gpus) / {epoch_end - epoch_start:.2f}(time)"
+    print(f'[rank{rank}] OMG~~~ all throughput is {calc}={throughput:.2f} img/sec loss: {loss}')
 
 print('Finished Training')
 
@@ -293,45 +288,45 @@ print('Finished Training')
 #
 # Let us look at how the network performs on the whole dataset.
 
-correct = 0
-total = 0
-with torch.no_grad():
-    for data in testloader:
-        images, labels = data
-        if fp16:
-            images = images.half()
-        outputs = net(images.to(model_engine.local_rank))
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct += (predicted == labels.to(
-            model_engine.local_rank)).sum().item()
+# correct = 0
+# total = 0
+# with torch.no_grad():
+#     for data in testloader:
+#         images, labels = data
+#         if fp16:
+#             images = images.half()
+#         outputs = net(images.to(model_engine.local_rank))
+#         _, predicted = torch.max(outputs.data, 1)
+#         total += labels.size(0)
+#         correct += (predicted == labels.to(
+#             model_engine.local_rank)).sum().item()
 
-print('Accuracy of the network on the 10000 test images: %d %%' %
-      (100 * correct / total))
+# print('Accuracy of the network on the 10000 test images: %d %%' %
+#       (100 * correct / total))
 
-########################################################################
-# That looks way better than chance, which is 10% accuracy (randomly picking
-# a class out of 10 classes).
-# Seems like the network learnt something.
-#
-# Hmmm, what are the classes that performed well, and the classes that did
-# not perform well:
+# ########################################################################
+# # That looks way better than chance, which is 10% accuracy (randomly picking
+# # a class out of 10 classes).
+# # Seems like the network learnt something.
+# #
+# # Hmmm, what are the classes that performed well, and the classes that did
+# # not perform well:
 
-class_correct = list(0. for i in range(10))
-class_total = list(0. for i in range(10))
-with torch.no_grad():
-    for data in testloader:
-        images, labels = data
-        if fp16:
-            images = images.half()
-        outputs = net(images.to(model_engine.local_rank))
-        _, predicted = torch.max(outputs, 1)
-        c = (predicted == labels.to(model_engine.local_rank)).squeeze()
-        for i in range(4):
-            label = labels[i]
-            class_correct[label] += c[i].item()
-            class_total[label] += 1
+# class_correct = list(0. for i in range(10))
+# class_total = list(0. for i in range(10))
+# with torch.no_grad():
+#     for data in testloader:
+#         images, labels = data
+#         if fp16:
+#             images = images.half()
+#         outputs = net(images.to(model_engine.local_rank))
+#         _, predicted = torch.max(outputs, 1)
+#         c = (predicted == labels.to(model_engine.local_rank)).squeeze()
+#         for i in range(4):
+#             label = labels[i]
+#             class_correct[label] += c[i].item()
+#             class_total[label] += 1
 
-for i in range(10):
-    print('Accuracy of %5s : %2d %%' %
-          (classes[i], 100 * class_correct[i] / class_total[i]))
+# for i in range(10):
+#     print('Accuracy of %5s : %2d %%' %
+#           (classes[i], 100 * class_correct[i] / class_total[i]))
