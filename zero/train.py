@@ -116,11 +116,6 @@ def train_base(args, logger, dataloader):
         start = time()
         outputs = engine(x)
         loss = engine.criterion(outputs, y)
-        # if args.use_ac:
-        #     loss.backward()
-        #     # loss.backward(retain_graph=True)
-        # else:
-        #     engine.backward(loss)
         engine.backward(loss)
         engine.step()
         torch.cuda.synchronize()
