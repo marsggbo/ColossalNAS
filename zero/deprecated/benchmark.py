@@ -197,7 +197,8 @@ def main():
         config=args.__dict__,
         name=name,
         group=name+f'-{seed}',
-        entity='marsggbo'
+        entity='marsggbo',
+        mode='offline'
     )
     
     # init GPU/CPU memory
@@ -215,6 +216,26 @@ def main():
             logger.info(f'rank[{grank}] Model numel: {numel}', ranks=[0])
             # Set tensor_placement_policy='cpu', which will offload params, grads and os
             model = ShardedModelV2(model, shard_strategy, tensor_placement_policy=placement, reuse_use_fp16_shard=True)       
+            
+            # from colossalai.utils.model.colo_init_context import ColoInitContext
+            # from colossalai.tensor import ColoParameter, ComputePattern, ComputeSpec, ProcessGroup, ReplicaSpec, ShardSpec
+            # from colossalai.utils import get_current_device
+            # world_size = torch.distributed.get_world_size()
+            # default_dist_spec = ShardSpec([-1], [world_size]) # or `None``
+            # shard_pg = ProcessGroup(tp_degree=world_size) # or `None`
+            # with ColoInitContext(device=get_current_device(),
+            #                     dtype=torch.half,
+            #                     default_dist_spec=default_dist_spec,
+            #                     default_pg=shard_pg):
+            #     model = get_model(args.model)
+            # tp_pg = ProcessGroup(tp_degree=1)
+            # gemini_config = dict(strict_ddp_mode=True,
+            #                      device=get_current_device(),
+            #                      placement_policy='cpu', # 'nvme
+            #                      pin_memory=True,
+            #                      hidden_dim=1024,
+            #                      search_range_mb=128)
+            # model = zero_model_wrapper(model, 3, gemini_config)
         elif use_pipeline:
             # Todo: add pipeline
             pipelinable = PipelinableContext()
@@ -230,8 +251,8 @@ def main():
             # # pipelinable.to_layer_list(model.exec_seq)
             # pipelinable.to_layer_list(exec_seq)
             pipelinable.to_layer_list()
-            pipelinable.policy = "uniform"
-            # pipelinable.policy = "balanced"
+            # pipelinable.policy = "uniform"
+            pipelinable.policy = "balanced"
             model = pipelinable.partition(1, gpc.pipeline_parallel_size, gpc.get_local_rank(ParallelMode.PIPELINE))
             # model = pipelinable.partition(1, gpc.pipeline_parallel_size, torch.distributed.get_rank())
         else:
@@ -269,7 +290,10 @@ def main():
 
     # build optimizer
     if dist_backend == 'colossalai' and use_zero:
-        optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nof)
+        # optim_config = dict(gpu_margin_mem_ratio=0.)
+        # optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nof, nvme_offload_dir='./')
+        # optimizer = zero_optim_wrapper(model, optimizer, optim_config=optim_config)
+        optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=nof, nvme_offload_dir='./nvme')
         optimizer = ShardedOptimizerV2(model, optimizer, initial_scale=2**5)
     elif dist_backend == 'torch_zero':
         optimizer = ZeroRedundancyOptimizer(
@@ -358,6 +382,9 @@ def main():
             cpu_mem_hist = [fw_c, bw_c]
         else:
             fb_start = time()
+            # (x, y) = data_iter.__next__()
+            # logger.info(f"rank[{grank}] batch size: {x.shape[0]}, {y.view(-1)[:20]}")
+            # torch.cuda.synchronize()
             engine.execute_schedule(data_iter, return_output_label=False)
             fb_c, fb_g, fb_gp = get_mem_info(lrank)
             fb_end = time()
@@ -389,8 +416,12 @@ def main():
         if n > 5:
             # time
             used_time += batch_time
-            num_samples += (batch_size * gpus)
-            batch_tp = gpus * batch_size / (batch_time + 1e-12) # batch throughput
+            if not use_pipeline:
+                batch_samples = batch_size * gpus
+            else:
+                batch_samples = batch_size
+            num_samples += batch_samples
+            batch_tp = batch_samples / (batch_time + 1e-12) # batch throughput
             
             if not use_pipeline:
                 data = [n, fw_c, bw_c, update_c, cp, fw_g, bw_g, update_g, gp, batch_time, batch_tp, fw_time, bw_time, update_time]

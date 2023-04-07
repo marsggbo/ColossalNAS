@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 class FakeDataset(Dataset):
-    def __init__(self, data_size=100, img_size=224):
+    def __init__(self, data_size=10000, img_size=224):
         self.data_size = data_size
         self.img_size = img_size
         self.input_data = torch.randn(3, self.img_size, self.img_size)

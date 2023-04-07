@@ -7,42 +7,42 @@ dist_backends = [
 ]
 models = [
     # 'vit_s',
-    'vit_b',
-    'vit_h',
-    'vit_g',
+    # 'vit_b',
+    # 'vit_h',
+    # 'vit_g',
     # 'vit_10b',
     'darts',
-    'ofa',
-    'mobilenet',
+    # 'ofa',
+    # 'mobilenet',
     # 'resnet152'
 ]
 gpus = [
-    # 1,
+    1,
     # 2,
     # 4,
-    8
+    # 8
 ]
 batch_sizes = [
     # 8,
     # 16,
     # 32,
-    # 64,
+    64,
     # 128,
-    256,
-    512,
+    # 256,
+    # 512,
     # 640,
     # 768,
     # 832,
-    1024,
-    2048,
+    # 1024,
+    # 2048,
     # 3200,
     # 4096,
     # 8192,
 ]
 img_sizes = [
-    32,
+    # 32,
     # 128,
-    # 224,
+    224,
 ]
 use_zeros = [
     0,
@@ -50,7 +50,11 @@ use_zeros = [
 ]
 use_pipelines = [
     0,
-    1,
+    # 1,
+]
+use_acs = [
+    0,
+    1
 ]
 use_fp16s = [
     0,
@@ -69,8 +73,9 @@ exp_name = '_'
 seed = 888
 
 # torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 benchmark.py \
+# torchrun --nproc_per_node={gpus} benchmark.py \
 command = '''
-torchrun --nproc_per_node={gpus} benchmark.py \
+torchrun --nproc_per_node={gpus} --rdzv_backend=c10d --rdzv_endpoint=localhost:0 benchmark.py \
 --dist_backend={dist_backend} \
 --gpus {gpus} \
 --model {model} \
