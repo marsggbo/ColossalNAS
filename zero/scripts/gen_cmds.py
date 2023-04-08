@@ -58,9 +58,9 @@ models = [
     # 'vit_h',
     # 'vit_g',
     # 'vit_10b',
-    'darts',
+    # 'darts',
     # 'ofa',
-    # 'mobilenet',
+    'mobilenet',
     # 'resnet152'
 ]
 debug = 0
@@ -94,8 +94,8 @@ for seed in seeds:
                                 for use_zero in use_zeros:
                                     if use_zero == 1 and use_pipeline == 1:
                                         continue # zero pipeline is not supported
-                                    if use_zero and not use_fp16:
-                                        continue # we only focus on zero fp16
+                                    if use_zero and use_fp16:
+                                        continue # zero is not supported for fp16
                                     if not use_zero:
                                         nof = 0
                                         placement = 'auto'
