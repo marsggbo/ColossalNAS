@@ -219,8 +219,8 @@ def train_zero(args, logger, dataloader):
             break
         rm.reset()
         engine.zero_grad()
-        if hasattr(model, 'arch') and step <= 5:
-            logger.info(f"step {step}: {model.arch}", ranks=[0])
+        if hasattr(model.module, 'arch') and step <= 5:
+            logger.info(f"step {step}: {model.module.arch}", ranks=[0])
 
         x = x.to(lrank)
         y = y.to(lrank)
