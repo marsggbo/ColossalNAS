@@ -7,6 +7,7 @@ import torch.nn as nn
 from torchvision import models
 
 from hyperbox.networks.base_nas_network import BaseNASNetwork
+from hyperbox.mutables import ops, spaces
 from hyperbox.mutables.spaces import OperationSpace
 from hyperbox.mutator import RandomMutator
 
@@ -29,6 +30,7 @@ def get_vit(cls=VisionTransformer, **kwargs):
         net = cls(**default_config)
     else:
         net = cls()
+        # net = cls(search_ratio=[1])
     if use_ac:
         def forward(self, x):
             out = self.vit_embed(x)
@@ -196,31 +198,42 @@ class ToyNASModel2(BaseNASNetwork):
             else:
                 out = self.conv3(out)
         else:
-            out = self.conv2(out)
+            from colossalai.utils.activation_checkpoint import checkpoint
+            out = checkpoint(self.conv2, True, out, use_reentrant=True)
+            # out = self.conv2(out)
         self.count += 1
         out = self.gavg(out).view(out.size(0), -1)
         out = self.fc(out)
         return out
 
 
-class ToyNASModel(nn.Module):
+class ToyNASModel(BaseNASNetwork):
     def __init__(self):
         super().__init__()
-        self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=False)
-        self.conv2 = torch.nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1, bias=False)
-        # self.conv3 = torch.nn.Conv2d(512, 1024, kernel_size=5, stride=1, padding=2, bias=False)
+        self.conv1 = torch.nn.Conv2d(3, 512, kernel_size=3, stride=1, padding=1, bias=True)
+        channels = spaces.ValueSpace([512, 1024])
+        self.conv2 = ops.Conv2d(512, channels, kernel_size=3, stride=1, padding=1, bias=True)
+        self.conv3 = ops.Conv2d(512, channels, kernel_size=5, stride=1, padding=2, bias=True)
+        self.bn = ops.BatchNorm2d(channels)
         self.gavg = torch.nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = torch.nn.Linear(1024, 1000, bias=False)
+        self.fc = ops.Linear(channels, 1000, bias=True)
         self.count = 0
 
     def forward(self, x):
         out = self.conv1(x)
-        # if self.count % 2 == 0:
-        #     out = self.conv2(out)
-        # else:
-        #     out = self.conv3(out)
-        out = self.conv2(out)
+        # from colossalai.utils.activation_checkpoint import checkpoint
+        if self.count % 2 == 0:
+            # out = checkpoint(self.conv2, True, out, use_reentrant=True)
+            print('running conv2')
+            out = self.conv2(out)
+        else:
+            # out = checkpoint(self.conv3, True, out, use_reentrant=True)
+            print('running conv3')
+            out = self.conv3(out)
+        # # out = checkpoint(self.conv2, True, out, use_reentrant=True)
+        # out = self.conv2(out)
         self.count += 1
+        # out = self.bn(out)
         out = self.gavg(out).view(out.size(0), -1)
         out = self.fc(out)
         return out
@@ -231,9 +244,10 @@ name2model = {
     'vit_vanilla': get_vit,
     'vit_s': partial(get_vit, cls=ViT_S),
     'vit_b': partial(get_vit, cls=ViT_B),
+    'vit_l': partial(get_vit, cls=ViT_L),
     'vit_h': partial(get_vit, cls=ViT_H),
     'vit_g': partial(get_vit, cls=ViT_G),
-    'vit_10b': ViT_10B,
+    'vit_10b': partial(get_vit, cls=ViT_10B),
     'darts': get_darts,
     'toy': ToyNASModel,
     'toy2': ToyNASModel2,

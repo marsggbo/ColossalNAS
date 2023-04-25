@@ -20,19 +20,8 @@ import torch.nn as nn
 import colossalai
 from colossalai.utils import get_dataloader
 from colossalai.logging import disable_existing_loggers, get_dist_logger
-## Colossalai Zero
-from colossalai.nn.parallel import zero_model_wrapper, zero_optim_wrapper
-from colossalai.utils.model.colo_init_context import ColoInitContext
 from colossalai.nn.optimizer import HybridAdam
-from colossalai.zero.init_ctx import ZeroInitContext
 from colossalai.core import global_context as gpc
-from colossalai.zero.shard_utils import (TensorShardStrategy,
-                                         BucketTensorShardStrategy)
-from colossalai.zero.sharded_model import ShardedModelV2
-from colossalai.zero.sharded_optim import ShardedOptimizerV2
-## Colossalai Pipeline
-from colossalai.context import ParallelMode
-from colossalai.pipeline.pipelinable import PipelinableContext
 ## Colossalai AMP (fp16)
 from colossalai.amp import AMP_TYPE
 
@@ -42,47 +31,8 @@ from dataloader import get_fake_dataloader, get_cifar10_dataloader, get_cifar10_
 from models import get_model
 from utils import print_mem_info, get_mem_info, get_memory_usage, ExpLog
 
-
 logger = loguru.logger
-@atexit.register
-def exit_handler():
-    global logger
-    logger.info("exit with no error", ranks=[0])
 
-def get_args():
-    parser = colossalai.get_default_parser()
-    parser.add_argument('--gpus', type=int, default=1)
-    parser.add_argument('--model', type=str, default='ofa')
-    parser.add_argument('--use_fp16', type=int, default=1) # 1: True 0: False
-    parser.add_argument('--use_pipeline', type=int, default=1) # 1: True 0: False
-    parser.add_argument('--use_zero', type=int, default=1) # 1: True 0: False
-    parser.add_argument('--nof', type=float, default=0.) # nvme offload fraction, a value between 0. and 1.
-    parser.add_argument('--placement', type=str, default='cpu') # 'cpu' or 'nvme'
-    parser.add_argument('--use_ac', type=int, default=0, help='use activation checkpointing') # 1: True 0: False
-    parser.add_argument('--steps', type=int, default=100) # number of steps
-    parser.add_argument('--img_size', type=int, default=224) # img size
-    parser.add_argument('--batch_size', type=int, default=64) # batch size
-    parser.add_argument('--exp_name', type=str, default='') # 1: True 0: False
-    parser.add_argument('--debug', type=int, default=0) # 1: True 0: False
-    parser.add_argument('--seed', type=int, default=666)
-
-    ### for colossalai only
-    parser.add_argument('--shardstrategy', type=str, default='btss') # tss: TensorShardStrategy, btss: BucketTensorShardStrategy 
-    
-    args = parser.parse_args()
-    return args
-
-def set_seed(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-def infinite_fake_data_generator(batch_size, img_size, num_classes=10):
-    while True:
-        yield (torch.rand(batch_size, 3, img_size, img_size), torch.randint(low=0, high=num_classes, size=(batch_size,)))
 
 def train_base(args, logger, dataloader):
     exp_log = ExpLog(args)
@@ -135,7 +85,10 @@ def train_base(args, logger, dataloader):
         exp_log.save_as_csv()
         exp_log.stats_and_save()
 
-def train_pipeline(args, logger, dataloader):
+def train_pipe(args, logger, dataloader):
+    ## Colossalai Pipeline
+    from colossalai.context import ParallelMode
+    from colossalai.pipeline.pipelinable import PipelinableContext
     exp_log = ExpLog(args)
     grank = int(os.environ['RANK'])
     lrank = int(os.environ['LOCAL_RANK'])
@@ -169,10 +122,10 @@ def train_pipeline(args, logger, dataloader):
             logger.info(f"step {step}: {model.arch}", ranks=[0])
 
         torch.cuda.synchronize()
-        start = time.time()
+        start = time()
         engine.execute_schedule(data_iter, return_output_label=False)
         torch.cuda.synchronize()
-        end = time.time()
+        end = time()
 
         batch_time = end - start
         throughput = BS / (end - start)
@@ -182,13 +135,19 @@ def train_pipeline(args, logger, dataloader):
             exp_log.add(batch_time, throughput)
         torch.cuda.synchronize()
         if lrank == 0:
-            logger.info(f'[rank{lrank}] step{step}: throughput is {calc}={throughput:.2f} img/sec loss: {loss}')
+            logger.info(f'[rank{lrank}] step{step}: throughput is {calc}={throughput:.2f} img/sec')
             logger.info(f'[rank{lrank}] step{step}: CPU Mem {cm:.2f} | GPU Mem-A({ag:.2f}) Max-Mem-A{mag:.2f} Mem-R({rg:.2f}) Max-Mem-R({mrg:.2f})')
     if lrank == 0:
         exp_log.save_as_csv()
         exp_log.stats_and_save()
 
 def train_zero(args, logger, dataloader):
+    # colossalai 0.2.8
+    from colossalai.zero.legacy.init_ctx import ZeroInitContext
+    from colossalai.zero.legacy.shard_utils import (TensorShardStrategy,
+                                            BucketTensorShardStrategy)
+    from colossalai.zero.legacy.sharded_model import ShardedModelV2
+    from colossalai.zero.legacy.sharded_optim import ShardedOptimizerV2
     exp_log = ExpLog(args)
     grank = int(os.environ['RANK'])
     lrank = int(os.environ['LOCAL_RANK'])
@@ -249,22 +208,154 @@ def train_zero(args, logger, dataloader):
         exp_log.save_as_csv()
         exp_log.stats_and_save()
 
+def train_zero_gemini(args, logger, dataloader):
+    from colossalai.utils import get_current_device
+    from colossalai.zero import ColoInitContext, zero_model_wrapper, zero_optim_wrapper
+    from colossalai.tensor import ColoParameter, ComputePattern, ComputeSpec, ProcessGroup, ReplicaSpec, ShardSpec
+
+    exp_log = ExpLog(args)
+    grank = int(os.environ['RANK'])
+    lrank = int(os.environ['LOCAL_RANK'])
+    world_size = torch.distributed.get_world_size()        
+
+    # Init model
+    rm = None
+    default_dist_spec = ShardSpec([-1], [world_size]) if args.tp_degree>1 else None
+    shard_pg = ProcessGroup(tp_degree=world_size) if args.tp_degree>1 else None
+    with ColoInitContext(device=get_current_device(),
+                            dtype=torch.half,
+                            default_dist_spec=default_dist_spec,
+                            default_pg=shard_pg):
+        model = get_model(args.model, args)
+        numel = sum(p.numel() for p in model.parameters())
+        wandb.config.update({'model_numel': numel})
+        logger.info(f'rank[{grank}] Model numel: {numel}', ranks=[0])
+        rm = RandomMutator(model)
+
+    # Tensor Parallelism (TP)
+    tp_pg = ProcessGroup(tp_degree=args.tp_degree)
+    if args.tp_degree > 1:
+        # Todo: add support for TP with gemini
+        tensor_parallelize(model, tp_pg)
+
+    # asign gemini running configurations
+    zero_stage = args.zero_stage
+    gemini_config = None
+    gemini_config = dict(
+        strict_ddp_mode=args.tp_degree == 1,
+        device=get_current_device(),
+        placement_policy=args.placement,
+        pin_memory=True,
+        hidden_dim=4096,
+        search_range_mb=32
+    )
+    model = zero_model_wrapper(model, zero_stage, gemini_config)
+    if zero_stage == 3:
+        optim_config = dict(gpu_margin_mem_ratio=0.)
+    else:
+        cpu_offload = args.placement == 'cpu'
+        optim_config = dict(
+            reduce_bucket_size=32 * 1024 * 1024,
+            overlap_communication=True,
+            cpu_offload=cpu_offload,
+        )
+    optimizer = HybridAdam(model.parameters(), lr=1e-3, nvme_offload_fraction=args.nof, nvme_offload_dir='./nvme')
+    optimizer = zero_optim_wrapper(model, optimizer, optim_config=optim_config)
+
+    criterion = torch.nn.CrossEntropyLoss()
+    engine, _, _, _ = colossalai.initialize(model, optimizer, criterion, None)
+    for step, (x, y) in enumerate(dataloader):
+        if step >= args.steps:
+            break
+        rm.reset()
+        engine.zero_grad()
+        if step <= 5:
+            try:
+                if hasattr(model, 'module') and hasattr(model.module, 'arch'):
+                    logger.info(f"step {step}: {model.module.arch}", ranks=[0])
+                else:
+                    logger.info(f"step {step}: {model.arch}", ranks=[0])
+            except:
+                pass
+
+        x = x.to(lrank).half()
+        y = y.to(lrank)
+        BS = x.shape[0]
+
+        torch.cuda.synchronize()
+        start = time()
+        outputs = engine(x)
+        loss = engine.criterion(outputs, y)
+        optimizer.backward(loss)
+        engine.step()
+        torch.cuda.synchronize()
+        end = time()
+
+        # calculate throughput and memory usage
+        batch_time = end - start
+        throughput = BS* world_size / (end - start)
+        calc = f"{BS} (BS) * {world_size}($gpus) / {end - start:.2f}(time)"
+        ag, mag, rg, mrg, cm = get_memory_usage(lrank)
+        if step>5:
+            exp_log.add(batch_time, throughput)
+        if lrank == 0:
+            logger.info(f'[rank{grank}] step{step}: throughput is {calc}={throughput:.2f} img/sec loss: {loss}')
+            logger.info(f'[rank{grank}] step{step}: CPU Mem {cm:.2f} | GPU Mem-A({ag:.2f}) Max-Mem-A({mag:.2f}) Mem-R({rg:.2f}) Max-Mem-R({mrg:.2f})')
+    if lrank == 0:
+        exp_log.save_as_csv()
+        exp_log.stats_and_save()
+
+def get_args():
+    parser = colossalai.get_default_parser()
+    parser.add_argument('--gpus', type=int, default=1)
+    parser.add_argument('--model', type=str, default='ofa')
+    parser.add_argument('--use_fp16', type=int, default=1) # 1: True 0: False
+    parser.add_argument('--use_pipeline', type=int, default=1) # 1: True 0: False
+    parser.add_argument('--use_zero', type=int, default=1) # 1: True 0: False
+    parser.add_argument('--zero_stage', type=int, default=2, choices=[1,2,3]) # [1,2,3]
+    parser.add_argument('--nof', type=float, default=0.) # nvme offload fraction, a value between 0. and 1.
+    parser.add_argument('--placement', type=str, default='auto') # 'cpu' or 'nvme'
+    parser.add_argument('--use_ac', type=int, default=0, help='use activation checkpointing') # 1: True 0: False
+    parser.add_argument('--steps', type=int, default=100) # number of steps
+    parser.add_argument('--img_size', type=int, default=224) # img size
+    parser.add_argument('--batch_size', type=int, default=64) # batch size
+    parser.add_argument('--exp_name', type=str, default='') # 1: True 0: False
+    parser.add_argument('--use_gemini', type=int, default=0, help="use gemini") # 1: True 0: False
+    parser.add_argument('--tp_degree', type=int, default=1, help="tensor parallel degree") # >=1
+    parser.add_argument('--debug', type=int, default=0) # 1: True 0: False
+    parser.add_argument('--seed', type=int, default=666)
+
+    ### for colossalai only
+    parser.add_argument('--shardstrategy', type=str, default='btss') # tss: TensorShardStrategy, btss: BucketTensorShardStrategy 
+    
+    args = parser.parse_args()
+    return args
+
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 def init(args):
     batch_size = args.batch_size
     model = args.model
     use_pipeline = args.use_pipeline
     use_zero = args.use_zero
+    zero_stage = args.zero_stage
+    placement = args.placement
+    shardstrategy = args.shardstrategy
+    nof = args.nof
+    use_ac = args.use_ac
     use_fp16 = args.use_fp16
     assert not (use_zero and use_pipeline), 'use_zero and use_pipeline cannot be True at the same time'
     gpus = args.gpus
     debug = args.debug
     steps = args.steps
-    placement = args.placement
     exp_name = args.exp_name
     img_size = args.img_size
-    shardstrategy = args.shardstrategy
-    nof = args.nof
-    use_ac = args.use_ac
     seed = args.seed
     set_seed(seed)
 
@@ -272,7 +363,7 @@ def init(args):
     date_of_run = datetime.now().strftime("%Y-%m-%d-%I:%M:%S_%p")
     root_dir = f'./logs/{model}/gpu{gpus}_{batch_size}x{img_size}x{img_size}'
     if use_zero:
-        root_dir += f'_zero_{shardstrategy}_nof{nof}'
+        root_dir += f'_zero{zero_stage}({placement})_{shardstrategy}_nof{nof}'
     if use_pipeline:
         root_dir += f'_pipeline'
     if use_fp16:
@@ -286,7 +377,14 @@ def init(args):
     # set up colossal config
     args.config = {}
     if use_zero:
-        args.config = {}
+        args.config = {
+            'torch_ddp': {
+                'find_unused_parameters': True,
+            },
+            'parallel': {
+                'data': args.gpus,
+            }
+        }
     if use_pipeline:
         args.config.update({
             'torch_ddp': {
@@ -355,7 +453,10 @@ if __name__ == '__main__':
         if args.use_pipeline != 0:
             train_pipe(args, logger, dataloader)
         elif args.use_zero != 0:
-            train_zero(args, logger, dataloader)
+            if args.use_gemini == 0:
+                train_zero(args, logger, dataloader)
+            else:
+                train_zero_gemini(args, logger, dataloader)
         else:
             train_base(args, logger, dataloader)
     except BaseException as e:
